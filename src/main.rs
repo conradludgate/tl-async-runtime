@@ -1,7 +1,8 @@
+use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use futures::{pin_mut, FutureExt};
 use rand::Rng;
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -21,20 +22,21 @@ impl TaskID {
 
 struct ThreadWrapper {
     thread: JoinHandle<()>,
-    parked: bool,
+    // parked: AtomicBool,
 }
-
 type Task = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
 struct Executor {
     threads: RwLock<Vec<ThreadWrapper>>,
     tasks: Mutex<HashMap<TaskID, Task>>,
     timers: RwLock<Vec<(TaskID, Instant)>>,
-    ready: RwLock<VecDeque<TaskID>>,
+    ready_reciever: Receiver<TaskID>,
+    ready_sender: Sender<TaskID>,
 }
 
 impl Executor {
-    fn get_task(self: &Arc<Self>) -> Option<TaskID> {
-        self.ready.write().unwrap().pop_front()
+    fn get_task(self: &Arc<Self>) -> Result<TaskID, TryRecvError> {
+        // println!("getting task {:?}", thread::current().id());
+        self.ready_reciever.try_recv()
     }
 }
 
@@ -60,13 +62,17 @@ where
         let exec = exec.borrow();
         let exec = exec.as_deref().unwrap();
 
+        // println!("spawn: acquiring lock on tasks");
         exec.tasks
             .lock()
             .unwrap()
             .insert(id, Box::pin(fut.map(|_| ())));
+        // println!("spawn: released lock on tasks");
 
-        exec.ready.write().unwrap().push_back(id);
+        exec.ready_sender.send(id).unwrap();
+
         for t in exec.threads.read().unwrap().iter() {
+            // println!("telling {:?} to unpark", t.thread.thread().id());
             t.thread.thread().unpark();
         }
     });
@@ -78,11 +84,13 @@ where
 
 /// Run a future to completion on the current thread.
 fn block_on<Fut: Future>(fut: Fut) -> Fut::Output {
+    let (ready_sender, ready_reciever) = unbounded::<TaskID>();
     let executor = Arc::new(Executor {
         threads: RwLock::new(Vec::new()),
         tasks: Mutex::new(HashMap::new()),
         timers: RwLock::new(Vec::new()),
-        ready: RwLock::new(VecDeque::new()),
+        ready_reciever,
+        ready_sender,
     });
     let waker = Waker::from(executor.clone());
     EXECUTOR.with(|exec| exec.borrow_mut().replace(executor.clone()));
@@ -100,31 +108,45 @@ fn block_on<Fut: Future>(fut: Fut) -> Fut::Output {
                     // get the next available task if there is one
                     let task = loop {
                         match exec.get_task() {
-                            Some(task) => break task,
-                            None => thread::park(),
+                            Ok(task) => break task,
+                            Err(TryRecvError::Empty) => {
+                                // println!("parking {:?}", thread::current().id());
+                                thread::park();
+                                // println!("resuming {:?}", thread::current().id());
+                            }
+                            Err(TryRecvError::Disconnected) => {
+                                return;
+                            }
                         }
                     };
 
                     // Get the fut for the task
-                    let mut fut = match exec.tasks.lock().unwrap().remove(&task) {
+                    // println!("thread: acquiring lock on tasks 1");
+                    let fut = exec.tasks.lock().unwrap().remove(&task);
+                    // println!("thread: releasing lock on tasks 1");
+                    let mut fut = match fut {
                         Some(fut) => fut,
                         None => continue,
                     };
 
                     // poll the fut
-                    if let Poll::Ready(res) = fut.as_mut().poll(&mut cx) {
-                        // task is done. clean up
-                        exec.tasks.lock().unwrap().remove(&task);
-                        break res;
+                    match fut.as_mut().poll(&mut cx) {
+                        Poll::Ready(()) => {}
+                        Poll::Pending => {
+                            // println!("thread: acquiring lock on tasks 2");
+                            exec.tasks.lock().unwrap().insert(task, fut);
+                            // println!("thread: releasing lock on tasks 2");
+                        }
                     }
                 }
             })
             .unwrap();
 
-        executor.threads.write().unwrap().push(ThreadWrapper {
-            thread,
-            parked: false,
-        })
+        executor
+            .threads
+            .write()
+            .unwrap()
+            .push(ThreadWrapper { thread })
     }
 
     // Pin the future so it can be polled.
@@ -148,12 +170,9 @@ fn block_on<Fut: Future>(fut: Fut) -> Fut::Output {
             Err(i) => i,
         };
         let mut tasks = executor.timers.write().unwrap();
-        let tasks = tasks.drain(..=index);
-        executor
-            .ready
-            .write()
-            .unwrap()
-            .extend(tasks.map(|(t, _)| t));
+        for task in tasks.drain(..=index) {
+            executor.ready_sender.send(task.0).unwrap()
+        }
 
         for t in executor.threads.read().unwrap().iter() {
             t.thread.thread().unpark();
@@ -163,26 +182,27 @@ fn block_on<Fut: Future>(fut: Fut) -> Fut::Output {
 
 fn main() {
     block_on(async {
+        println!("begin dispatch");
         for i in 0..6 {
             spawn(print_from_thread(i));
         }
         thread::sleep(Duration::from_millis(1000));
+        println!("begin dispatch");
         for i in 6..12 {
             spawn(print_from_thread(i));
         }
         thread::sleep(Duration::from_millis(1000));
+        println!("begin dispatch");
         for i in 12..18 {
             spawn(print_from_thread(i));
         }
         thread::sleep(Duration::from_millis(1000));
+        println!("begin dispatch");
         print_from_thread(20).await;
     });
 }
 
 async fn print_from_thread(i: usize) {
-    println!(
-        "Hi from inside a future {}! thread={:?}",
-        i,
-        thread::current().id()
-    );
+    thread::sleep(Duration::from_millis(10));
+    println!("Hi from inside future {}! {:?}", i, thread::current().id());
 }

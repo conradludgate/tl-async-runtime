@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 futures = "0.3"
 rand = "0.8"
+crossbeam-channel = "0.5"
