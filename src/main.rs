@@ -1,17 +1,19 @@
-use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
-use futures::{pin_mut, FutureExt};
+use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
+use futures::FutureExt;
+use pin_project::pin_project;
 use rand::Rng;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::future::Future;
 use std::marker::PhantomData;
+use std::ops::Add;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-
-#[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(Hash, PartialEq, Eq, Clone, Copy, Debug, PartialOrd, Ord)]
 struct TaskID(u64);
 
 impl TaskID {
@@ -28,7 +30,7 @@ type Task = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
 struct Executor {
     threads: RwLock<Vec<ThreadWrapper>>,
     tasks: Mutex<HashMap<TaskID, Task>>,
-    timers: RwLock<Vec<(TaskID, Instant)>>,
+    timers: RwLock<BinaryHeap<(Reverse<Instant>, TaskID)>>,
     ready_reciever: Receiver<TaskID>,
     ready_sender: Sender<TaskID>,
 }
@@ -37,6 +39,30 @@ impl Executor {
     fn get_task(self: &Arc<Self>) -> Result<TaskID, TryRecvError> {
         // println!("getting task {:?}", thread::current().id());
         self.ready_reciever.try_recv()
+    }
+
+    fn spawn<F>(self: &Arc<Self>, fut: F) -> SpawnHandle<F::Output>
+    where
+        F: Future + Send + Sync + 'static,
+    {
+        let id = TaskID::new();
+
+        // println!("spawn: acquiring lock on tasks");
+        self.tasks
+            .lock()
+            .unwrap()
+            .insert(id, Box::pin(fut.map(|_| ())));
+        // println!("spawn: released lock on tasks");
+
+        self.ready_sender.send(id).unwrap();
+
+        let mut threads = self.threads.write().unwrap();
+        threads.rotate_left(1);
+        threads[0].thread.thread().unpark();
+
+        SpawnHandle {
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -47,6 +73,7 @@ impl Wake for Executor {
 
 thread_local! {
     static EXECUTOR: RefCell<Option<Arc<Executor>>> = RefCell::new(None);
+    static TASK_ID: RefCell<TaskID> = RefCell::new(TaskID(0));
 }
 
 struct SpawnHandle<R> {
@@ -58,41 +85,67 @@ where
     F: Future + Send + Sync + 'static,
 {
     EXECUTOR.with(|exec| {
-        let id = TaskID::new();
         let exec = exec.borrow();
-        let exec = exec.as_deref().unwrap();
+        let exec = exec.as_ref().unwrap();
 
-        // println!("spawn: acquiring lock on tasks");
-        exec.tasks
-            .lock()
-            .unwrap()
-            .insert(id, Box::pin(fut.map(|_| ())));
-        // println!("spawn: released lock on tasks");
+        exec.spawn(fut)
+    })
+}
 
-        exec.ready_sender.send(id).unwrap();
+#[pin_project]
+pub struct Sleep {
+    instant: Instant,
+}
 
-        for t in exec.threads.read().unwrap().iter() {
-            // println!("telling {:?} to unpark", t.thread.thread().id());
-            t.thread.thread().unpark();
+impl Future for Sleep {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+        let instant = *self.project().instant;
+        if instant > Instant::now() {
+            TASK_ID.with(|id| {
+                let id = *id.borrow();
+                EXECUTOR.with(|exec| {
+                    let exec = exec.borrow();
+                    exec.as_deref()
+                        .unwrap()
+                        .timers
+                        .write()
+                        .unwrap()
+                        .push((Reverse(instant), id));
+                    Poll::Pending
+                })
+            })
+        } else {
+            Poll::Ready(())
         }
-    });
+    }
+}
 
-    SpawnHandle {
-        _marker: PhantomData,
+impl Sleep {
+    async fn until(instant: Instant) {
+        Self { instant }.await
+    }
+    async fn duration(duration: Duration) {
+        Sleep::until(Instant::now().add(duration)).await
     }
 }
 
 /// Run a future to completion on the current thread.
-fn block_on<Fut: Future>(fut: Fut) -> Fut::Output {
+fn block_on<Fut: Future>(fut: Fut) -> Fut::Output
+where
+    Fut::Output: Send + Sync + 'static,
+    Fut: Send + Sync + 'static,
+{
     let (ready_sender, ready_reciever) = unbounded::<TaskID>();
     let executor = Arc::new(Executor {
         threads: RwLock::new(Vec::new()),
         tasks: Mutex::new(HashMap::new()),
-        timers: RwLock::new(Vec::new()),
+        timers: RwLock::new(BinaryHeap::new()),
         ready_reciever,
         ready_sender,
     });
-    let waker = Waker::from(executor.clone());
+
     EXECUTOR.with(|exec| exec.borrow_mut().replace(executor.clone()));
 
     for _ in 0..7 {
@@ -129,15 +182,19 @@ fn block_on<Fut: Future>(fut: Fut) -> Fut::Output {
                         None => continue,
                     };
 
-                    // poll the fut
-                    match fut.as_mut().poll(&mut cx) {
-                        Poll::Ready(()) => {}
-                        Poll::Pending => {
-                            // println!("thread: acquiring lock on tasks 2");
-                            exec.tasks.lock().unwrap().insert(task, fut);
-                            // println!("thread: releasing lock on tasks 2");
+                    TASK_ID.with(|id| {
+                        *id.borrow_mut() = task;
+
+                        // poll the fut
+                        match fut.as_mut().poll(&mut cx) {
+                            Poll::Ready(()) => {}
+                            Poll::Pending => {
+                                // println!("thread: acquiring lock on tasks 2");
+                                exec.tasks.lock().unwrap().insert(task, fut);
+                                // println!("thread: releasing lock on tasks 2");
+                            }
                         }
-                    }
+                    });
                 }
             })
             .unwrap();
@@ -149,33 +206,29 @@ fn block_on<Fut: Future>(fut: Fut) -> Fut::Output {
             .push(ThreadWrapper { thread })
     }
 
-    // Pin the future so it can be polled.
-    pin_mut!(fut);
-    let mut cx = Context::from_waker(&waker);
+    let (final_sender, final_reciever) = bounded::<Fut::Output>(1);
+    let final_sender = Arc::new(final_sender);
+    let fut = fut.map(move |out| {
+        final_sender.send(out).unwrap();
+    });
+
+    executor.spawn(fut);
 
     // Run the future to completion.
     loop {
-        if let Poll::Ready(res) = fut.as_mut().poll(&mut cx) {
+        if let Ok(res) = final_reciever.try_recv() {
             break res;
         }
         // get the current task timers that have elapsed and insert them into the ready tasks
         let instant = Instant::now();
-        let index = executor
-            .timers
-            .read()
-            .unwrap()
-            .binary_search_by_key(&instant, |(_, t)| *t);
-        let index = match index {
-            Ok(i) => i,
-            Err(i) => i,
-        };
-        let mut tasks = executor.timers.write().unwrap();
-        for task in tasks.drain(..=index) {
-            executor.ready_sender.send(task.0).unwrap()
-        }
+        let mut timers = executor.timers.write().unwrap();
+        while timers.peek().map(|(t, _)| t.0 < instant).unwrap_or(false) {
+            let (_, id) = timers.pop().unwrap();
+            executor.ready_sender.send(id).unwrap();
 
-        for t in executor.threads.read().unwrap().iter() {
-            t.thread.thread().unpark();
+            let mut threads = executor.threads.write().unwrap();
+            threads.rotate_left(1);
+            threads[0].thread.thread().unpark();
         }
     }
 }
@@ -186,23 +239,23 @@ fn main() {
         for i in 0..6 {
             spawn(print_from_thread(i));
         }
-        thread::sleep(Duration::from_millis(1000));
+        Sleep::duration(Duration::from_millis(1000)).await;
         println!("begin dispatch");
         for i in 6..12 {
             spawn(print_from_thread(i));
         }
-        thread::sleep(Duration::from_millis(1000));
+        Sleep::duration(Duration::from_millis(1000)).await;
         println!("begin dispatch");
         for i in 12..18 {
             spawn(print_from_thread(i));
         }
-        thread::sleep(Duration::from_millis(1000));
+        Sleep::duration(Duration::from_millis(1000)).await;
         println!("begin dispatch");
         print_from_thread(20).await;
     });
 }
 
 async fn print_from_thread(i: usize) {
-    thread::sleep(Duration::from_millis(10));
+    Sleep::duration(Duration::from_millis(10)).await;
     println!("Hi from inside future {}! {:?}", i, thread::current().id());
 }
