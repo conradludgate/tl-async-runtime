@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::future::Future;
-use std::ops::Add;
+use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll, Wake, Waker};
@@ -26,6 +26,7 @@ struct ThreadWrapper {
     thread: JoinHandle<()>,
     // parked: AtomicBool,
 }
+
 type Task = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
 struct Executor {
     threads: RwLock<Vec<ThreadWrapper>>,
@@ -57,14 +58,23 @@ impl<R> Future for SpawnHandle<R> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
+        // poll the inner channel for the spawned future's result
         this.receiver.as_mut().poll(cx).map(|x| x.unwrap())
     }
 }
 
 impl Executor {
-    fn get_task(self: &Arc<Self>) -> Result<TaskID, TryRecvError> {
+    fn get_ready_task(self: &Arc<Self>) -> Result<TaskID, TryRecvError> {
         // println!("getting task {:?}", thread::current().id());
         self.ready_reciever.try_recv()
+    }
+
+    fn signal_ready(self: &Arc<Self>, id: TaskID) {
+        self.ready_sender.send(id).unwrap();
+
+        let mut threads = self.threads.write().unwrap();
+        threads.rotate_left(1);
+        threads[0].thread.thread().unpark();
     }
 
     fn spawn<F>(self: &Arc<Self>, fut: F) -> SpawnHandle<F::Output>
@@ -84,7 +94,7 @@ impl Executor {
         );
         // println!("spawn: released lock on tasks");
 
-        self.ready(id);
+        self.signal_ready(id);
 
         SpawnHandle {
             task: OwnedTask {
@@ -93,14 +103,6 @@ impl Executor {
             },
             receiver,
         }
-    }
-
-    fn ready(self: &Arc<Self>, id: TaskID) {
-        self.ready_sender.send(id).unwrap();
-
-        let mut threads = self.threads.write().unwrap();
-        threads.rotate_left(1);
-        threads[0].thread.thread().unpark();
     }
 }
 
@@ -114,7 +116,7 @@ impl Wake for MyWaker {
         self.wake_by_ref();
     }
     fn wake_by_ref(self: &Arc<Self>) {
-        self.executor.ready_sender.send(self.id).unwrap();
+        self.executor.signal_ready(self.id);
     }
 }
 
@@ -123,17 +125,33 @@ thread_local! {
     static TASK_ID: RefCell<TaskID> = RefCell::new(TaskID(0));
 }
 
+fn task_context<F, R>(f: F) -> R
+where
+    F: FnOnce(TaskID) -> R,
+{
+    TASK_ID.with(|id| f(*id.borrow()))
+}
+
+fn executor_context<F, R>(f: F) -> R
+where
+    F: FnOnce(&Arc<Executor>) -> R,
+{
+    EXECUTOR.with(|exec| {
+        let exec = exec.borrow();
+        let exec = exec
+            .as_ref()
+            .expect("spawn called outside of an executor context");
+
+        f(exec)
+    })
+}
+
 pub fn spawn<F>(fut: F) -> SpawnHandle<F::Output>
 where
     F: Future + Send + Sync + 'static,
     F::Output: Send + Sync + 'static,
 {
-    EXECUTOR.with(|exec| {
-        let exec = exec.borrow();
-        let exec = exec.as_ref().unwrap();
-
-        exec.spawn(fut)
-    })
+    executor_context(|exec| exec.spawn(fut))
 }
 
 #[pin_project]
@@ -147,16 +165,9 @@ impl Future for Sleep {
     fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
         let instant = *self.project().instant;
         if instant > Instant::now() {
-            TASK_ID.with(|id| {
-                let id = *id.borrow();
-                EXECUTOR.with(|exec| {
-                    let exec = exec.borrow();
-                    exec.as_deref()
-                        .unwrap()
-                        .timers
-                        .write()
-                        .unwrap()
-                        .push((Reverse(instant), id));
+            task_context(|id| {
+                executor_context(|exec| {
+                    exec.timers.write().unwrap().push((Reverse(instant), id));
                     Poll::Pending
                 })
             })
@@ -171,7 +182,7 @@ impl Sleep {
         Self { instant }.await
     }
     pub async fn duration(duration: Duration) {
-        Sleep::until(Instant::now().add(duration)).await
+        Sleep::until(Instant::now() + duration).await
     }
 }
 
@@ -192,60 +203,12 @@ where
 
     EXECUTOR.with(|exec| exec.borrow_mut().replace(executor.clone()));
 
-    for _ in 0..7 {
+    // spawn a bunch fof worker threads
+    for i in 0..7 {
         let exec = executor.clone();
         let thread = thread::Builder::new()
-            .spawn(move || {
-                let exec2 = exec.clone();
-                EXECUTOR.with(|exec| exec.borrow_mut().replace(exec2));
-                let exec2 = exec.clone();
-
-                loop {
-                    // get the next available task if there is one
-                    let task = loop {
-                        match exec2.get_task() {
-                            Ok(task) => break task,
-                            Err(TryRecvError::Empty) => {
-                                // println!("parking {:?}", thread::current().id());
-                                thread::park();
-                                // println!("resuming {:?}", thread::current().id());
-                            }
-                            Err(TryRecvError::Disconnected) => {
-                                return;
-                            }
-                        }
-                    };
-
-                    // Get the fut for the task
-                    // println!("thread: acquiring lock on tasks 1");
-                    let fut = exec.tasks.lock().unwrap().remove(&task);
-                    // println!("thread: releasing lock on tasks 1");
-                    let mut fut = match fut {
-                        Some(fut) => fut,
-                        None => continue,
-                    };
-
-                    TASK_ID.with(|id| {
-                        *id.borrow_mut() = task;
-
-                        let waker = Waker::from(Arc::new(MyWaker {
-                            id: task,
-                            executor: exec.clone(),
-                        }));
-                        let mut cx = Context::from_waker(&waker);
-
-                        // poll the fut
-                        match fut.as_mut().poll(&mut cx) {
-                            Poll::Ready(()) => {}
-                            Poll::Pending => {
-                                // println!("thread: acquiring lock on tasks 2");
-                                exec.tasks.lock().unwrap().insert(task, fut);
-                                // println!("thread: releasing lock on tasks 2");
-                            }
-                        }
-                    });
-                }
-            })
+            .name(format!("tl-async-runtime-worker-{}", i))
+            .spawn(move || exec.run_worker_thread())
             .unwrap();
 
         executor
@@ -255,16 +218,11 @@ where
             .push(ThreadWrapper { thread })
     }
 
-    // let (final_sender, final_reciever) = bounded::<Fut::Output>(1);
-    // let final_sender = Arc::new(final_sender);
-    // let fut = fut.map(move |out| {
-    //     final_sender.send(out).unwrap();
-    // });
-
     let mut handle = executor.spawn(fut);
 
     // Run the future to completion.
     loop {
+        // if the output value is ready, return
         if let Some(res) = handle.receiver.try_recv().unwrap() {
             break res;
         }
@@ -273,7 +231,73 @@ where
         let mut timers = executor.timers.write().unwrap();
         while timers.peek().map(|(t, _)| t.0 < instant).unwrap_or(false) {
             let (_, id) = timers.pop().unwrap();
-            executor.ready(id);
+            executor.signal_ready(id);
         }
+    }
+}
+
+impl Executor {
+    fn acquire_task(self: &Arc<Self>) -> ControlFlow<(), Option<(TaskID, Task)>> {
+        // request a new task from the queue
+        let task = loop {
+            match self.get_ready_task() {
+                Ok(task) => break task,
+                Err(TryRecvError::Empty) => {
+                    // if no tasks are available, park the thread.
+                    // threads are woken up randomly when new tasks become available
+
+                    // println!("parking {:?}", thread::current().id());
+                    thread::park();
+                    // println!("resuming {:?}", thread::current().id());
+                }
+                Err(TryRecvError::Disconnected) => {
+                    // queue has closed, this means the block_on main thread has exited
+                    return ControlFlow::Break(());
+                }
+            }
+        };
+
+        // the task may have been dropped or acquired by another thread already
+        match self.tasks.lock().unwrap().remove(&task) {
+            Some(fut) => ControlFlow::Continue(Some((task, fut))),
+            None => ControlFlow::Continue(None),
+        }
+    }
+
+    fn run_worker_thread(self: &Arc<Self>) {
+        EXECUTOR.with(|exec| *exec.borrow_mut() = Some(self.clone()));
+
+        loop {
+            // acquire sole access to an available task
+            let (task, mut fut) = match self.acquire_task() {
+                ControlFlow::Continue(Some(task)) => task,
+                ControlFlow::Continue(None) => continue,
+                ControlFlow::Break(()) => return,
+            };
+
+            TASK_ID.with(|id| {
+                *id.borrow_mut() = task;
+
+                let waker = Waker::from(Arc::new(self.clone().new_waker(task)));
+                let mut cx = Context::from_waker(&waker);
+
+                // poll the fut
+                match fut.as_mut().poll(&mut cx) {
+                    Poll::Ready(()) => {}
+                    Poll::Pending => {
+                        // if the task isn't yet ready, put it back on the task list.
+                        // It's the task's responsibility to wake it self up (eg timer queue or IO events)
+
+                        // println!("thread: acquiring lock on tasks 2");
+                        self.tasks.lock().unwrap().insert(task, fut);
+                        // println!("thread: releasing lock on tasks 2");
+                    }
+                }
+            });
+        }
+    }
+
+    fn new_waker(self: Arc<Self>, id: TaskID) -> MyWaker {
+        MyWaker { id, executor: self }
     }
 }
