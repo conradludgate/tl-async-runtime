@@ -100,7 +100,7 @@ impl Executor {
         self.register();
 
         // spawn a bunch of worker threads
-        for i in 1..1 {
+        for i in 1..8 {
             let exec = self.clone();
             thread::Builder::new()
                 .name(format!("tl-async-runtime-worker-{}", i))
