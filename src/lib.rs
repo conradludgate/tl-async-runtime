@@ -13,8 +13,11 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 
 mod driver;
-pub mod io;
 mod ready;
+
+/// Tools used for communicating with the OS
+pub mod io;
+/// Timers used for pausing tasks for fixed durations
 pub mod timers;
 
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Debug, PartialOrd, Ord)]
@@ -54,6 +57,7 @@ impl<R> Future for SpawnHandle<R> {
 }
 
 impl Executor {
+    /// Signals that a task is now ready to be worked on
     pub(crate) fn signal_ready(&self, id: TaskId) {
         self.ready.push(id);
 
@@ -64,18 +68,23 @@ impl Executor {
         threads[0].unpark();
     }
 
+    /// Spawns a task in this executor
     pub(crate) fn spawn<F>(&self, fut: F) -> SpawnHandle<F::Output>
     where
         F: Future + Send + Sync + 'static,
         F::Output: Send + Sync + 'static,
     {
+        // get a new task id and channel to send the results over
         let id = TaskId::new();
         let (sender, receiver) = oneshot::channel();
 
+        // Pin the future. Also wrap it s.t. it sends it's output over the channel
         let fut = Box::pin(fut.map(|out| sender.send(out).unwrap_or_default()));
+        // insert the task into the runtime and signal that it is ready for processing
         self.tasks.insert(id, fut);
-        self.signal_ready(id); // new tasks are instantly ready
+        self.signal_ready(id);
 
+        // return the handle to the reciever so that it can be `await`ed with it's output value
         SpawnHandle { receiver }
     }
 
@@ -92,11 +101,15 @@ impl Executor {
         os.process()
     }
 
+    /// Run a future to completion.
+    ///
+    /// Starts a new runtime and spawns the future on it.
     fn block_on<F, R>(self: &Arc<Executor>, fut: F) -> R
     where
         F: Future<Output = R> + Send + Sync + 'static,
         R: Send + Sync + 'static,
     {
+        // register this thread as a worker
         self.register();
 
         // spawn a bunch of worker threads
@@ -105,18 +118,21 @@ impl Executor {
             thread::Builder::new()
                 .name(format!("tl-async-runtime-worker-{}", i))
                 .spawn(move || {
+                    // register this new thread as a worker in the runtime
                     exec.register();
+                    // Run tasks until told to exit
                     while let ControlFlow::Continue(_) = exec.run_task() {}
                 })
                 .unwrap();
         }
 
+        // Spawn the task in the newly created runtime
         let handle = self.spawn(fut);
         pin_mut!(handle);
 
-        let waker = Waker::from(Arc::new(ThreadWaker {
-            thread: thread::current(),
-        }));
+        // Waker specifically for the main thread.
+        // Used to wake up the main thread when the output value is ready
+        let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
         let mut cx = Context::from_waker(&waker);
 
         // Run the future to completion.
@@ -125,24 +141,27 @@ impl Executor {
             if let Poll::Ready(res) = handle.as_mut().poll(&mut cx) {
                 break res;
             }
+
+            // make the main thread busy and also run some tasks
             self.run_task();
         }
     }
 }
 
-struct ThreadWaker {
-    thread: Thread,
-}
+struct ThreadWaker(Thread);
 
 impl Wake for ThreadWaker {
     fn wake(self: Arc<Self>) {
         self.wake_by_ref();
     }
     fn wake_by_ref(self: &Arc<Self>) {
-        self.thread.unpark();
+        self.0.unpark();
     }
 }
 
+/// Spawn a future on the current runtime.
+/// Returns a new future that can be later awaited for it's output.
+/// Task execution begins eagerly, without needing you to await it
 pub fn spawn<F, R>(fut: F) -> SpawnHandle<R>
 where
     F: Future<Output = R> + Send + Sync + 'static,
@@ -151,7 +170,9 @@ where
     executor_context(|exec| exec.clone().spawn(fut))
 }
 
-/// Run a future to completion on the current thread.
+/// Run a future to completion.
+///
+/// Starts a new runtime and spawns the future on it.
 pub fn block_on<F, R>(fut: F) -> R
 where
     F: Future<Output = R> + Send + Sync + 'static,

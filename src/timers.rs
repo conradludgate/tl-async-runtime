@@ -48,6 +48,8 @@ impl<'a> Iterator for QueueIter<'a> {
     }
 }
 
+/// Future for sleeping fixed amounts of time.
+/// Does not block the thread
 #[pin_project]
 pub struct Sleep {
     instant: Instant,
@@ -72,9 +74,11 @@ impl Future for Sleep {
 }
 
 impl Sleep {
+    /// sleep until a specific point in time
     pub fn until(instant: Instant) -> Sleep {
         Self { instant }
     }
+    /// sleep for a specific duration of time
     pub fn duration(duration: Duration) -> Sleep {
         Sleep::until(Instant::now() + duration)
     }

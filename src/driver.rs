@@ -1,3 +1,5 @@
+use crate::{Executor, Task, TaskId};
+use crossbeam_channel::TryRecvError;
 use std::{
     cell::RefCell,
     ops::ControlFlow,
@@ -6,32 +8,21 @@ use std::{
     thread,
 };
 
-use crossbeam_channel::TryRecvError;
-
-use crate::{Executor, Task, TaskId};
-
 thread_local! {
     static EXECUTOR: RefCell<Option<Arc<Executor>>> = RefCell::new(None);
     static TASK_ID: RefCell<TaskId> = RefCell::new(TaskId(0));
 }
 
-pub(crate) fn task_context<F, R>(f: F) -> R
-where
-    F: FnOnce(TaskId) -> R,
-{
+pub(crate) fn task_context<R>(f: impl FnOnce(TaskId) -> R) -> R {
     TASK_ID.with(|id| f(*id.borrow()))
 }
 
-pub(crate) fn executor_context<F, R>(f: F) -> R
-where
-    F: FnOnce(&Arc<Executor>) -> R,
-{
+pub(crate) fn executor_context<R>(f: impl FnOnce(&Arc<Executor>) -> R) -> R {
     EXECUTOR.with(|exec| {
         let exec = exec.borrow();
         let exec = exec
             .as_ref()
             .expect("spawn called outside of an executor context");
-
         f(exec)
     })
 }
@@ -101,10 +92,12 @@ impl Executor {
         // register the task id
         TASK_ID.with(|id| *id.borrow_mut() = task);
 
-        let waker = Waker::from(Arc::new(TaskWaker {
-            task,
-            executor: self.clone(),
-        }));
+        // Create a new waker for the current task.
+        // When the wake is called, it tells the executor
+        // that the task is once again ready for work
+        // and will be picked up by an available thread
+        let executor = self.clone();
+        let waker = Waker::from(Arc::new(TaskWaker { task, executor }));
         let mut cx = Context::from_waker(&waker);
 
         match fut.as_mut().poll(&mut cx) {

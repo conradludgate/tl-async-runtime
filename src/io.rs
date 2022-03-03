@@ -1,17 +1,16 @@
+/// Networking specific handlers
 pub mod net;
 
+use crate::{driver::executor_context, Executor};
+use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
+use mio::event::Source;
+use rand::Rng;
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
     sync::Arc,
     time::Duration,
 };
-
-use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
-use mio::event::Source;
-use rand::Rng;
-
-use crate::{driver::executor_context, Executor};
 
 #[derive(Debug)]
 pub(crate) struct Event(u8);
@@ -90,7 +89,7 @@ impl<S: Source> DerefMut for Registration<S> {
 
 impl<S: Source> Registration<S> {
     pub fn new(mut source: S, interests: mio::Interest) -> std::io::Result<Self> {
-        executor_context::<_, std::io::Result<Self>>(|exec| {
+        executor_context(|exec| {
             let token = mio::Token(rand::thread_rng().gen());
             exec.os
                 .lock()

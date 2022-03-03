@@ -12,17 +12,20 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::{Event, Registration};
 
+/// Listener for TCP events
 pub struct TcpListener {
     registration: Registration<mio::net::TcpListener>,
 }
 
 impl TcpListener {
+    /// Create a new TcpListener bound to the socket
     pub fn bind(addr: SocketAddr) -> std::io::Result<Self> {
         let listener = mio::net::TcpListener::bind(addr)?;
         let registration = super::Registration::new(listener, mio::Interest::READABLE)?;
         Ok(Self { registration })
     }
 
+    /// Accept a new TcpStream to communicate with
     pub async fn accept(&self) -> std::io::Result<(TcpStream, SocketAddr)> {
         loop {
             self.registration.ready().next().await;
@@ -35,6 +38,7 @@ impl TcpListener {
     }
 }
 
+/// Handles communication over a TCP connection
 #[pin_project]
 pub struct TcpStream {
     registration: Registration<mio::net::TcpStream>,
