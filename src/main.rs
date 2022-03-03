@@ -2,7 +2,7 @@ use std::{thread, time::Duration};
 
 use futures::{stream::FuturesUnordered, StreamExt};
 use rand::Rng;
-use tl_async_runtime::{block_on, spawn, Sleep};
+use tl_async_runtime::{block_on, spawn, timers::Sleep};
 
 fn main() {
     block_on(async {
