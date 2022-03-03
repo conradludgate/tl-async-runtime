@@ -1,4 +1,5 @@
-use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
+use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
+use futures::channel::oneshot;
 use futures::FutureExt;
 use pin_project::pin_project;
 use rand::Rng;
@@ -6,7 +7,6 @@ use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::future::Future;
-use std::marker::PhantomData;
 use std::ops::Add;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
@@ -35,6 +35,32 @@ struct Executor {
     ready_sender: Sender<TaskID>,
 }
 
+pub struct OwnedTask {
+    id: TaskID,
+    executor: Arc<Executor>,
+}
+#[pin_project]
+pub struct SpawnHandle<R> {
+    task: OwnedTask,
+    #[pin]
+    receiver: oneshot::Receiver<R>,
+}
+
+impl Drop for OwnedTask {
+    fn drop(&mut self) {
+        self.executor.tasks.lock().unwrap().remove(&self.id);
+    }
+}
+
+impl<R> Future for SpawnHandle<R> {
+    type Output = R;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+        this.receiver.as_mut().poll(cx).map(|x| x.unwrap())
+    }
+}
+
 impl Executor {
     fn get_task(self: &Arc<Self>) -> Result<TaskID, TryRecvError> {
         // println!("getting task {:?}", thread::current().id());
@@ -44,31 +70,52 @@ impl Executor {
     fn spawn<F>(self: &Arc<Self>, fut: F) -> SpawnHandle<F::Output>
     where
         F: Future + Send + Sync + 'static,
+        F::Output: Send + Sync + 'static,
     {
         let id = TaskID::new();
+        let (sender, receiver) = oneshot::channel();
 
         // println!("spawn: acquiring lock on tasks");
-        self.tasks
-            .lock()
-            .unwrap()
-            .insert(id, Box::pin(fut.map(|_| ())));
+        self.tasks.lock().unwrap().insert(
+            id,
+            Box::pin(fut.map(|out| {
+                sender.send(out).map_err(|_| ()).unwrap();
+            })),
+        );
         // println!("spawn: released lock on tasks");
 
+        self.ready(id);
+
+        SpawnHandle {
+            task: OwnedTask {
+                id,
+                executor: self.clone(),
+            },
+            receiver,
+        }
+    }
+
+    fn ready(self: &Arc<Self>, id: TaskID) {
         self.ready_sender.send(id).unwrap();
 
         let mut threads = self.threads.write().unwrap();
         threads.rotate_left(1);
         threads[0].thread.thread().unpark();
-
-        SpawnHandle {
-            _marker: PhantomData,
-        }
     }
 }
 
-impl Wake for Executor {
-    fn wake(self: Arc<Self>) {}
-    fn wake_by_ref(self: &Arc<Self>) {}
+pub struct MyWaker {
+    executor: Arc<Executor>,
+    id: TaskID,
+}
+
+impl Wake for MyWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.executor.ready_sender.send(self.id).unwrap();
+    }
 }
 
 thread_local! {
@@ -76,13 +123,10 @@ thread_local! {
     static TASK_ID: RefCell<TaskID> = RefCell::new(TaskID(0));
 }
 
-pub struct SpawnHandle<R> {
-    _marker: PhantomData<R>,
-}
-
 pub fn spawn<F>(fut: F) -> SpawnHandle<F::Output>
 where
     F: Future + Send + Sync + 'static,
+    F::Output: Send + Sync + 'static,
 {
     EXECUTOR.with(|exec| {
         let exec = exec.borrow();
@@ -154,13 +198,12 @@ where
             .spawn(move || {
                 let exec2 = exec.clone();
                 EXECUTOR.with(|exec| exec.borrow_mut().replace(exec2));
+                let exec2 = exec.clone();
 
-                let waker = Waker::from(exec.clone());
-                let mut cx = Context::from_waker(&waker);
                 loop {
                     // get the next available task if there is one
                     let task = loop {
-                        match exec.get_task() {
+                        match exec2.get_task() {
                             Ok(task) => break task,
                             Err(TryRecvError::Empty) => {
                                 // println!("parking {:?}", thread::current().id());
@@ -185,6 +228,12 @@ where
                     TASK_ID.with(|id| {
                         *id.borrow_mut() = task;
 
+                        let waker = Waker::from(Arc::new(MyWaker {
+                            id: task,
+                            executor: exec.clone(),
+                        }));
+                        let mut cx = Context::from_waker(&waker);
+
                         // poll the fut
                         match fut.as_mut().poll(&mut cx) {
                             Poll::Ready(()) => {}
@@ -206,17 +255,17 @@ where
             .push(ThreadWrapper { thread })
     }
 
-    let (final_sender, final_reciever) = bounded::<Fut::Output>(1);
-    let final_sender = Arc::new(final_sender);
-    let fut = fut.map(move |out| {
-        final_sender.send(out).unwrap();
-    });
+    // let (final_sender, final_reciever) = bounded::<Fut::Output>(1);
+    // let final_sender = Arc::new(final_sender);
+    // let fut = fut.map(move |out| {
+    //     final_sender.send(out).unwrap();
+    // });
 
-    executor.spawn(fut);
+    let mut handle = executor.spawn(fut);
 
     // Run the future to completion.
     loop {
-        if let Ok(res) = final_reciever.try_recv() {
+        if let Some(res) = handle.receiver.try_recv().unwrap() {
             break res;
         }
         // get the current task timers that have elapsed and insert them into the ready tasks
@@ -224,11 +273,7 @@ where
         let mut timers = executor.timers.write().unwrap();
         while timers.peek().map(|(t, _)| t.0 < instant).unwrap_or(false) {
             let (_, id) = timers.pop().unwrap();
-            executor.ready_sender.send(id).unwrap();
-
-            let mut threads = executor.threads.write().unwrap();
-            threads.rotate_left(1);
-            threads[0].thread.thread().unpark();
+            executor.ready(id);
         }
     }
 }
