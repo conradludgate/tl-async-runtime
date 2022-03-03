@@ -64,7 +64,7 @@ impl Executor {
         threads[0].unpark();
     }
 
-    fn spawn<F>(self: Arc<Self>, fut: F) -> SpawnHandle<F::Output>
+    pub(crate) fn spawn<F>(&self, fut: F) -> SpawnHandle<F::Output>
     where
         F: Future + Send + Sync + 'static,
         F::Output: Send + Sync + 'static,
@@ -89,7 +89,44 @@ impl Executor {
 
         // get the OS events
         let mut os = self.os.lock();
-        os.process(self)
+        os.process()
+    }
+
+    fn block_on<F, R>(self: &Arc<Executor>, fut: F) -> R
+    where
+        F: Future<Output = R> + Send + Sync + 'static,
+        R: Send + Sync + 'static,
+    {
+        self.register();
+
+        // spawn a bunch of worker threads
+        for i in 1..1 {
+            let exec = self.clone();
+            thread::Builder::new()
+                .name(format!("tl-async-runtime-worker-{}", i))
+                .spawn(move || {
+                    exec.register();
+                    while let ControlFlow::Continue(_) = exec.run_task() {}
+                })
+                .unwrap();
+        }
+
+        let handle = self.spawn(fut);
+        pin_mut!(handle);
+
+        let waker = Waker::from(Arc::new(ThreadWaker {
+            thread: thread::current(),
+        }));
+        let mut cx = Context::from_waker(&waker);
+
+        // Run the future to completion.
+        loop {
+            // if the output value is ready, return
+            if let Poll::Ready(res) = handle.as_mut().poll(&mut cx) {
+                break res;
+            }
+            self.run_task();
+        }
     }
 }
 
@@ -115,40 +152,11 @@ where
 }
 
 /// Run a future to completion on the current thread.
-pub fn block_on<Fut: Future>(fut: Fut) -> Fut::Output
+pub fn block_on<F, R>(fut: F) -> R
 where
-    Fut::Output: Send + Sync + 'static,
-    Fut: Send + Sync + 'static,
+    F: Future<Output = R> + Send + Sync + 'static,
+    R: Send + Sync + 'static,
 {
     let executor = Arc::new(Executor::default());
-    executor.register();
-
-    // spawn a bunch of worker threads
-    for i in 1..8 {
-        let exec = executor.clone();
-        thread::Builder::new()
-            .name(format!("tl-async-runtime-worker-{}", i))
-            .spawn(move || {
-                exec.register();
-                while let ControlFlow::Continue(_) = exec.run_task() {}
-            })
-            .unwrap();
-    }
-
-    let handle = executor.clone().spawn(fut);
-    pin_mut!(handle);
-
-    let waker = Waker::from(Arc::new(ThreadWaker {
-        thread: thread::current(),
-    }));
-    let mut cx = Context::from_waker(&waker);
-
-    // Run the future to completion.
-    loop {
-        // if the output value is ready, return
-        if let Poll::Ready(res) = handle.as_mut().poll(&mut cx) {
-            break res;
-        }
-        executor.run_task();
-    }
+    executor.block_on(fut)
 }

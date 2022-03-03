@@ -1,21 +1,45 @@
 pub mod net;
 
-use std::{collections::HashMap, sync::Arc, task::Poll, time::Duration, ops::{Deref, DerefMut}, pin::Pin};
+use std::{
+    collections::HashMap,
+    ops::{Deref, DerefMut},
+    sync::Arc,
+    time::Duration,
+};
 
-use futures::Future;
+use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use mio::event::Source;
-use pin_project::pin_project;
 use rand::Rng;
 
-use crate::{
-    driver::{executor_context, task_context},
-    Executor, TaskId,
-};
+use crate::{driver::executor_context, Executor};
+
+#[derive(Debug)]
+pub(crate) struct Event(u8);
+impl Event {
+    pub fn is_readable(&self) -> bool {
+        self.0 & 1 != 0
+    }
+    pub fn is_writable(&self) -> bool {
+        self.0 & 2 != 0
+    }
+}
+impl From<&mio::event::Event> for Event {
+    fn from(e: &mio::event::Event) -> Self {
+        let mut event = 0;
+        if e.is_readable() {
+            event |= 1;
+        }
+        if e.is_writable() {
+            event |= 2;
+        }
+        Event(event)
+    }
+}
 
 pub(crate) struct Os {
     pub poll: mio::Poll,
     pub events: mio::Events,
-    pub tasks: HashMap<mio::Token, TaskId>,
+    pub tasks: HashMap<mio::Token, UnboundedSender<Event>>,
 }
 
 impl Default for Os {
@@ -29,7 +53,7 @@ impl Default for Os {
 }
 
 impl Os {
-    pub(crate) fn process(&mut self, executor: &Executor) {
+    pub(crate) fn process(&mut self) {
         let Self {
             poll,
             events,
@@ -38,9 +62,8 @@ impl Os {
         poll.poll(events, Some(Duration::from_millis(10))).unwrap();
 
         for event in &*events {
-            dbg!(event);
-            if let Some(task) = tasks.remove(&event.token()) {
-                executor.signal_ready(task);
+            if let Some(sender) = tasks.get(&event.token()) {
+                sender.unbounded_send(event.into()).unwrap();
             }
         }
     }
@@ -82,11 +105,10 @@ impl<S: Source> Registration<S> {
         })
     }
 
-    pub fn ready(&self) -> RegistrationReady {
-        RegistrationReady {
-            exec: self.exec.clone(),
-            token: Some(self.token),
-        }
+    pub fn ready(&self) -> UnboundedReceiver<Event> {
+        let (sender, receiver) = unbounded();
+        self.exec.os.lock().tasks.insert(self.token, sender);
+        receiver
     }
 }
 
@@ -99,36 +121,5 @@ impl<S: Source> Drop for Registration<S> {
             .registry()
             .deregister(&mut self.source)
             .unwrap();
-    }
-}
-
-#[pin_project]
-pub(crate) struct RegistrationReady {
-    pub exec: Arc<Executor>,
-    pub token: Option<mio::Token>,
-}
-
-impl RegistrationReady {
-    fn reset(self: Pin<&mut Self>, token: mio::Token) {
-        task_context(|id| {
-            self.exec.os.lock().tasks.insert(token, id);
-        })
-    }
-}
-
-impl Future for RegistrationReady {
-    type Output = ();
-
-    fn poll(
-        mut self: Pin<&mut Self>,
-        _: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        let this = self.as_mut().project();
-        if let Some(token) = this.token.take() {
-            self.reset(token);
-            Poll::Pending
-        } else {
-            Poll::Ready(())
-        }
     }
 }
