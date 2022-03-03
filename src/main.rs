@@ -9,7 +9,7 @@ fn main() {
         let futs = FuturesUnordered::new();
         for i in 0..10 {
             futs.push(spawn(async move {
-                let ms = rand::thread_rng().gen_range(0..5000);
+                let ms = rand::thread_rng().gen_range(0..1000);
                 Sleep::duration(Duration::from_millis(ms)).await;
                 print_from_thread(i).await;
             }));

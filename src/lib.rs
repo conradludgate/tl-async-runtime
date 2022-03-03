@@ -1,6 +1,6 @@
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use futures::channel::oneshot;
-use futures::FutureExt;
+use futures::{pin_mut, FutureExt};
 use pin_project::pin_project;
 use rand::Rng;
 use std::cell::RefCell;
@@ -9,9 +9,10 @@ use std::collections::{BinaryHeap, HashMap};
 use std::future::Future;
 use std::ops::ControlFlow;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll, Wake, Waker};
-use std::thread::{self, JoinHandle};
+use std::thread::{self, Thread};
 use std::time::{Duration, Instant};
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Debug, PartialOrd, Ord)]
 struct TaskID(u64);
@@ -23,17 +24,56 @@ impl TaskID {
 }
 
 struct ThreadWrapper {
-    thread: JoinHandle<()>,
+    thread: Thread,
     // parked: AtomicBool,
 }
 
+struct Os {
+    poll: mio::Poll,
+    events: mio::Events,
+}
+
+impl Default for Os {
+    fn default() -> Self {
+        Self {
+            poll: mio::Poll::new().unwrap(),
+            events: mio::Events::with_capacity(128),
+        }
+    }
+}
+
+struct ReadyQueue {
+    receiver: Receiver<TaskID>,
+    sender: Sender<TaskID>,
+}
+
+impl ReadyQueue {
+    pub fn poll(&self) -> Result<TaskID, TryRecvError> {
+        // println!("getting task {:?}", thread::current().id());
+        self.receiver.try_recv()
+    }
+    pub fn push(&self, id: TaskID) {
+        self.sender.send(id).unwrap();
+    }
+}
+
+impl Default for ReadyQueue {
+    fn default() -> Self {
+        let (sender, receiver) = unbounded();
+        Self { receiver, sender }
+    }
+}
+
 type Task = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
+#[derive(Default)]
 struct Executor {
     threads: RwLock<Vec<ThreadWrapper>>,
     tasks: Mutex<HashMap<TaskID, Task>>,
-    timers: RwLock<BinaryHeap<(Reverse<Instant>, TaskID)>>,
-    ready_reciever: Receiver<TaskID>,
-    ready_sender: Sender<TaskID>,
+    timers: Mutex<BinaryHeap<(Reverse<Instant>, TaskID)>>,
+    ready: ReadyQueue,
+    os: Mutex<Os>,
+    parked: Arc<()>,
+    done: AtomicBool,
 }
 
 pub struct OwnedTask {
@@ -64,17 +104,12 @@ impl<R> Future for SpawnHandle<R> {
 }
 
 impl Executor {
-    fn get_ready_task(self: &Arc<Self>) -> Result<TaskID, TryRecvError> {
-        // println!("getting task {:?}", thread::current().id());
-        self.ready_reciever.try_recv()
-    }
-
     fn signal_ready(self: &Arc<Self>, id: TaskID) {
-        self.ready_sender.send(id).unwrap();
+        self.ready.push(id);
 
         let mut threads = self.threads.write().unwrap();
         threads.rotate_left(1);
-        threads[0].thread.thread().unpark();
+        threads[0].thread.unpark();
     }
 
     fn spawn<F>(self: &Arc<Self>, fut: F) -> SpawnHandle<F::Output>
@@ -106,17 +141,32 @@ impl Executor {
     }
 }
 
-pub struct MyWaker {
+pub struct TaskWaker {
     executor: Arc<Executor>,
     id: TaskID,
 }
 
-impl Wake for MyWaker {
+impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
         self.wake_by_ref();
     }
     fn wake_by_ref(self: &Arc<Self>) {
         self.executor.signal_ready(self.id);
+    }
+}
+
+pub struct ThreadWaker {
+    executor: Arc<Executor>,
+    thread: Thread,
+}
+
+impl Wake for ThreadWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.executor.done.store(true, Ordering::SeqCst);
+        self.thread.unpark();
     }
 }
 
@@ -167,7 +217,7 @@ impl Future for Sleep {
         if instant > Instant::now() {
             task_context(|id| {
                 executor_context(|exec| {
-                    exec.timers.write().unwrap().push((Reverse(instant), id));
+                    exec.timers.lock().unwrap().push((Reverse(instant), id));
                     Poll::Pending
                 })
             })
@@ -192,63 +242,87 @@ where
     Fut::Output: Send + Sync + 'static,
     Fut: Send + Sync + 'static,
 {
-    let (ready_sender, ready_reciever) = unbounded::<TaskID>();
-    let executor = Arc::new(Executor {
-        threads: RwLock::new(Vec::new()),
-        tasks: Mutex::new(HashMap::new()),
-        timers: RwLock::new(BinaryHeap::new()),
-        ready_reciever,
-        ready_sender,
-    });
-
+    let executor = Arc::new(Executor::default());
     EXECUTOR.with(|exec| exec.borrow_mut().replace(executor.clone()));
 
-    // spawn a bunch fof worker threads
-    for i in 0..7 {
+    // spawn a bunch of worker threads
+    for i in 1..8 {
         let exec = executor.clone();
-        let thread = thread::Builder::new()
+        let join_handle = thread::Builder::new()
             .name(format!("tl-async-runtime-worker-{}", i))
             .spawn(move || exec.run_worker_thread())
             .unwrap();
 
-        executor
-            .threads
-            .write()
-            .unwrap()
-            .push(ThreadWrapper { thread })
+        executor.threads.write().unwrap().push(ThreadWrapper {
+            thread: join_handle.thread().clone(),
+        })
     }
 
-    let mut handle = executor.spawn(fut);
+    executor.threads.write().unwrap().push(ThreadWrapper {
+        thread: thread::current(),
+    });
+
+    let handle = executor.spawn(fut);
+    pin_mut!(handle);
+
+    let waker = Waker::from(Arc::new(ThreadWaker {
+        executor: executor.clone(),
+        thread: thread::current(),
+    }));
+    let mut cx = Context::from_waker(&waker);
 
     // Run the future to completion.
     loop {
         // if the output value is ready, return
-        if let Some(res) = handle.receiver.try_recv().unwrap() {
+        if let Poll::Ready(res) = handle.as_mut().poll(&mut cx) {
             break res;
         }
-        // get the current task timers that have elapsed and insert them into the ready tasks
-        let instant = Instant::now();
-        let mut timers = executor.timers.write().unwrap();
-        while timers.peek().map(|(t, _)| t.0 < instant).unwrap_or(false) {
-            let (_, id) = timers.pop().unwrap();
-            executor.signal_ready(id);
-        }
+        executor.run_task();
+        // executor.book_keeping();
     }
 }
 
 impl Executor {
+    fn book_keeping(self: &Arc<Self>) {
+        // get the current task timers that have elapsed and insert them into the ready tasks
+        let instant = Instant::now();
+        let mut timers = self.timers.lock().unwrap();
+        while timers.peek().map(|(t, _)| t.0 < instant).unwrap_or(false) {
+            let (_, id) = timers.pop().unwrap();
+            self.signal_ready(id);
+        }
+
+        // // get the OS events
+        // let mut os = self.os.lock().unwrap();
+        // let Os { poll, events } = &mut *os;
+        // poll.poll(events, Some(Duration::from_millis(10)))
+        //     .unwrap();
+
+        // for event in &os.events {}
+    }
+
+    fn park_thread(self: &Arc<Self>) {
+        if Arc::strong_count(&self.parked) < self.threads.read().unwrap().len() {
+            let _park = self.parked.clone();
+            // println!("parking {:?}", thread::current().id());
+            thread::park();
+            // println!("resuming {:?}", thread::current().id());
+        }
+    }
+
     fn acquire_task(self: &Arc<Self>) -> ControlFlow<(), Option<(TaskID, Task)>> {
         // request a new task from the queue
         let task = loop {
-            match self.get_ready_task() {
+            if self.done.load(Ordering::Relaxed) {
+                return ControlFlow::Break(());
+            }
+            match self.ready.poll() {
                 Ok(task) => break task,
                 Err(TryRecvError::Empty) => {
                     // if no tasks are available, park the thread.
                     // threads are woken up randomly when new tasks become available
-
-                    // println!("parking {:?}", thread::current().id());
-                    thread::park();
-                    // println!("resuming {:?}", thread::current().id());
+                    self.park_thread();
+                    self.book_keeping();
                 }
                 Err(TryRecvError::Disconnected) => {
                     // queue has closed, this means the block_on main thread has exited
@@ -264,40 +338,44 @@ impl Executor {
         }
     }
 
+    fn run_task(self: &Arc<Self>) -> ControlFlow<(), Option<()>> {
+        // self.book_keeping();
+
+        // acquire sole access to an available task
+        let (task, mut fut) = match self.acquire_task()? {
+            Some(task) => task,
+            None => return ControlFlow::Continue(None),
+        };
+
+        TASK_ID.with(|id| {
+            *id.borrow_mut() = task;
+
+            let waker = Waker::from(Arc::new(self.clone().new_task_waker(task)));
+            let mut cx = Context::from_waker(&waker);
+
+            // poll the fut
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(()) => {}
+                Poll::Pending => {
+                    // if the task isn't yet ready, put it back on the task list.
+                    // It's the task's responsibility to wake it self up (eg timer queue or IO events)
+
+                    // println!("thread: acquiring lock on tasks 2");
+                    self.tasks.lock().unwrap().insert(task, fut);
+                    // println!("thread: releasing lock on tasks 2");
+                }
+            }
+        });
+        ControlFlow::Continue(Some(()))
+    }
+
     fn run_worker_thread(self: &Arc<Self>) {
         EXECUTOR.with(|exec| *exec.borrow_mut() = Some(self.clone()));
 
-        loop {
-            // acquire sole access to an available task
-            let (task, mut fut) = match self.acquire_task() {
-                ControlFlow::Continue(Some(task)) => task,
-                ControlFlow::Continue(None) => continue,
-                ControlFlow::Break(()) => return,
-            };
-
-            TASK_ID.with(|id| {
-                *id.borrow_mut() = task;
-
-                let waker = Waker::from(Arc::new(self.clone().new_waker(task)));
-                let mut cx = Context::from_waker(&waker);
-
-                // poll the fut
-                match fut.as_mut().poll(&mut cx) {
-                    Poll::Ready(()) => {}
-                    Poll::Pending => {
-                        // if the task isn't yet ready, put it back on the task list.
-                        // It's the task's responsibility to wake it self up (eg timer queue or IO events)
-
-                        // println!("thread: acquiring lock on tasks 2");
-                        self.tasks.lock().unwrap().insert(task, fut);
-                        // println!("thread: releasing lock on tasks 2");
-                    }
-                }
-            });
-        }
+        while let ControlFlow::Continue(_) = self.run_task() {}
     }
 
-    fn new_waker(self: Arc<Self>, id: TaskID) -> MyWaker {
-        MyWaker { id, executor: self }
+    fn new_task_waker(self: Arc<Self>, id: TaskID) -> TaskWaker {
+        TaskWaker { id, executor: self }
     }
 }
