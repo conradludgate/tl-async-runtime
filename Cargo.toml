@@ -10,6 +10,6 @@ futures = "0.3"
 rand = "0.8"
 crossbeam-channel = "0.5"
 pin-project = "1.0"
-mio = { version = "0.8", features = ["os-poll"] }
+mio = { version = "0.8", features = ["os-poll", "net"] }
 chashmap = "2.2.2"
 parking_lot = "0.12"

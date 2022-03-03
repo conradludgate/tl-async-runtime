@@ -2,17 +2,18 @@ use chashmap::CHashMap;
 use driver::executor_context;
 use futures::channel::oneshot;
 use futures::{pin_mut, FutureExt};
+use parking_lot::{Mutex, RwLock};
 use pin_project::pin_project;
 use rand::Rng;
 use std::future::Future;
 use std::ops::ControlFlow;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 
 mod driver;
-mod io;
+pub mod io;
 mod ready;
 pub mod timers;
 
@@ -36,20 +37,8 @@ struct Executor {
     parked: Arc<()>,
 }
 
-struct OwnedTask {
-    id: TaskId,
-    executor: Arc<Executor>,
-}
-
-impl Drop for OwnedTask {
-    fn drop(&mut self) {
-        self.executor.tasks.remove(&self.id);
-    }
-}
-
 #[pin_project]
 pub struct SpawnHandle<R> {
-    task: OwnedTask,
     #[pin]
     receiver: oneshot::Receiver<R>,
 }
@@ -70,7 +59,7 @@ impl Executor {
 
         // get a 'random' thread from the loop and wake it up.
         // does nothing if the thread is not parked.
-        let mut threads = self.threads.write().unwrap();
+        let mut threads = self.threads.write();
         threads.rotate_left(1);
         threads[0].unpark();
     }
@@ -83,12 +72,11 @@ impl Executor {
         let id = TaskId::new();
         let (sender, receiver) = oneshot::channel();
 
-        let fut = Box::pin(fut.map(|out| sender.send(out).map_err(|_| ()).unwrap()));
+        let fut = Box::pin(fut.map(|out| sender.send(out).unwrap_or_default()));
         self.tasks.insert(id, fut);
         self.signal_ready(id); // new tasks are instantly ready
 
-        let task = OwnedTask { id, executor: self };
-        SpawnHandle { task, receiver }
+        SpawnHandle { receiver }
     }
 
     // this is run by any thread that currently is not busy.
@@ -100,7 +88,7 @@ impl Executor {
         }
 
         // get the OS events
-        let mut os = self.os.lock().unwrap();
+        let mut os = self.os.lock();
         os.process(self)
     }
 }
@@ -118,10 +106,10 @@ impl Wake for ThreadWaker {
     }
 }
 
-pub fn spawn<F>(fut: F) -> SpawnHandle<F::Output>
+pub fn spawn<F, R>(fut: F) -> SpawnHandle<R>
 where
-    F: Future + Send + Sync + 'static,
-    F::Output: Send + Sync + 'static,
+    F: Future<Output = R> + Send + Sync + 'static,
+    R: Send + Sync + 'static,
 {
     executor_context(|exec| exec.clone().spawn(fut))
 }

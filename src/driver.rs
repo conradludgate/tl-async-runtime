@@ -54,7 +54,7 @@ impl Executor {
     fn park_thread(&self) {
         // Skip if parking would cause all threads to be parked.
         // We need at least 1 thread running the books.
-        if Arc::strong_count(&self.parked) + 1 < self.threads.read().unwrap().len() {
+        if Arc::strong_count(&self.parked) + 1 < self.threads.read().len() {
             let _park = self.parked.clone(); // increment the counter. decrements automatically
             thread::park();
         }
@@ -120,7 +120,7 @@ impl Executor {
 
     /// register this executor on the current thread
     pub(crate) fn register(self: &Arc<Self>) {
-        self.threads.write().unwrap().push(thread::current());
+        self.threads.write().push(thread::current());
         EXECUTOR.with(|exec| *exec.borrow_mut() = Some(self.clone()));
     }
 }
