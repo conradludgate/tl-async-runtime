@@ -246,7 +246,7 @@ where
     EXECUTOR.with(|exec| exec.borrow_mut().replace(executor.clone()));
 
     // spawn a bunch of worker threads
-    for i in 1..8 {
+    for i in 1..4 {
         let exec = executor.clone();
         let join_handle = thread::Builder::new()
             .name(format!("tl-async-runtime-worker-{}", i))
@@ -302,7 +302,7 @@ impl Executor {
     }
 
     fn park_thread(self: &Arc<Self>) {
-        if Arc::strong_count(&self.parked) < self.threads.read().unwrap().len() {
+        if Arc::strong_count(&self.parked) + 1 < self.threads.read().unwrap().len() {
             let _park = self.parked.clone();
             // println!("parking {:?}", thread::current().id());
             thread::park();
@@ -312,25 +312,19 @@ impl Executor {
 
     fn acquire_task(self: &Arc<Self>) -> ControlFlow<(), Option<(TaskID, Task)>> {
         // request a new task from the queue
-        let task = loop {
-            if self.done.load(Ordering::Relaxed) {
+        let task = match self.ready.poll() {
+            Ok(task) => task,
+            Err(TryRecvError::Empty) => {
+                // if no tasks are available, park the thread.
+                // threads are woken up randomly when new tasks become available
+                self.park_thread();
+                return ControlFlow::Continue(None);
+            }
+            Err(TryRecvError::Disconnected) => {
+                // queue has closed, this means the block_on main thread has exited
                 return ControlFlow::Break(());
             }
-            match self.ready.poll() {
-                Ok(task) => break task,
-                Err(TryRecvError::Empty) => {
-                    // if no tasks are available, park the thread.
-                    // threads are woken up randomly when new tasks become available
-                    self.park_thread();
-                    self.book_keeping();
-                }
-                Err(TryRecvError::Disconnected) => {
-                    // queue has closed, this means the block_on main thread has exited
-                    return ControlFlow::Break(());
-                }
-            }
         };
-
         // the task may have been dropped or acquired by another thread already
         match self.tasks.lock().unwrap().remove(&task) {
             Some(fut) => ControlFlow::Continue(Some((task, fut))),
@@ -339,7 +333,7 @@ impl Executor {
     }
 
     fn run_task(self: &Arc<Self>) -> ControlFlow<(), Option<()>> {
-        // self.book_keeping();
+        self.book_keeping();
 
         // acquire sole access to an available task
         let (task, mut fut) = match self.acquire_task()? {
