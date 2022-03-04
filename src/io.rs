@@ -51,15 +51,12 @@ impl Default for Os {
 impl Os {
     /// Polls the OS for new events, and dispatches those to any awaiting tasks
     pub(crate) fn process(&mut self) {
-        let Self {
-            poll,
-            events,
-            tasks,
-        } = self;
-        poll.poll(events, Some(Duration::from_millis(10))).unwrap();
+        self.poll
+            .poll(&mut self.events, Some(Duration::from_millis(10)))
+            .unwrap();
 
-        for event in &*events {
-            if let Some(sender) = tasks.get(&event.token()) {
+        for event in &self.events {
+            if let Some(sender) = self.tasks.get(&event.token()) {
                 sender.unbounded_send(event.into()).unwrap();
             }
         }

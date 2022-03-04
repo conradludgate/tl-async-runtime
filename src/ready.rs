@@ -3,8 +3,8 @@ use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use crate::TaskId;
 
 pub(crate) struct Queue {
-    pub receiver: Receiver<TaskId>,
-    pub sender: Sender<TaskId>,
+    receiver: Receiver<TaskId>,
+    sender: Sender<TaskId>,
 }
 
 impl Queue {

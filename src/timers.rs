@@ -8,7 +8,6 @@ use std::{
 
 use futures::Future;
 use parking_lot::{Mutex, MutexGuard};
-use pin_project::pin_project;
 
 use crate::{
     driver::{executor_context, task_context},
@@ -50,7 +49,6 @@ impl<'a> Iterator for QueueIter<'a> {
 
 /// Future for sleeping fixed amounts of time.
 /// Does not block the thread
-#[pin_project]
 pub struct Sleep {
     instant: Instant,
 }
@@ -59,16 +57,15 @@ impl Future for Sleep {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
-        let instant = *self.project().instant;
         // if the future is not yet ready
-        if instant > Instant::now() {
+        if self.instant > Instant::now() {
             task_context(|id| {
                 executor_context(|exec| {
                     // register the timer on the executor
-                    exec.timers.insert(instant, id);
-                    Poll::Pending
+                    exec.timers.insert(self.instant, id);
                 })
-            })
+            });
+            Poll::Pending
         } else {
             Poll::Ready(())
         }

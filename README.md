@@ -1,6 +1,6 @@
 # tl-async-runtime
 
-A fairly basic runtime example in <600 lines of logic
+A fairly basic runtime example in <500 lines of logic
 
 ## Features
 

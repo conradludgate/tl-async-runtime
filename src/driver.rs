@@ -4,7 +4,7 @@ use std::{
     cell::RefCell,
     ops::ControlFlow,
     sync::Arc,
-    task::{Context, Poll, Wake, Waker},
+    task::{Context, Wake, Waker},
     thread,
 };
 
@@ -20,9 +20,8 @@ pub(crate) fn task_context<R>(f: impl FnOnce(TaskId) -> R) -> R {
 pub(crate) fn executor_context<R>(f: impl FnOnce(&Arc<Executor>) -> R) -> R {
     EXECUTOR.with(|exec| {
         let exec = exec.borrow();
-        let exec = exec
-            .as_ref()
-            .expect("spawn called outside of an executor context");
+        let exec = exec.as_ref();
+        let exec = exec.expect("spawn called outside of an executor context");
         f(exec)
     })
 }
@@ -34,9 +33,6 @@ struct TaskWaker {
 
 impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
-        self.wake_by_ref();
-    }
-    fn wake_by_ref(self: &Arc<Self>) {
         self.executor.signal_ready(self.task);
     }
 }
@@ -56,21 +52,17 @@ impl Executor {
     /// Parks if there are no tasks available.
     /// Returns Break if the task queue is broken.
     fn acquire_task(&self) -> ControlFlow<(), Option<(TaskId, Task)>> {
-        match self.ready.poll() {
-            Ok(task) => match self.tasks.remove(&task) {
-                Some(fut) => ControlFlow::Continue(Some((task, fut))),
-                None => ControlFlow::Continue(None),
-            },
+        match self.ready.poll().map(|t| (t, self.tasks.remove(&t))) {
+            Ok((task, Some(fut))) => ControlFlow::Continue(Some((task, fut))),
+            Ok((_, None)) => ControlFlow::Continue(None),
             Err(TryRecvError::Empty) => {
                 // if no tasks are available, park the thread.
                 // threads are woken up randomly when new tasks become available
                 self.park_thread();
                 ControlFlow::Continue(None)
             }
-            Err(TryRecvError::Disconnected) => {
-                // queue has closed, this means the block_on main thread has exited
-                ControlFlow::Break(())
-            }
+            // queue has closed, this means the block_on main thread has exited
+            Err(TryRecvError::Disconnected) => ControlFlow::Break(()),
         }
     }
 
@@ -100,14 +92,11 @@ impl Executor {
         let waker = Waker::from(Arc::new(TaskWaker { task, executor }));
         let mut cx = Context::from_waker(&waker);
 
-        match fut.as_mut().poll(&mut cx) {
-            Poll::Ready(()) => {}
-            Poll::Pending => {
-                // if the task isn't yet ready, put it back on the task list.
-                // It's the task's responsibility to wake it self up (eg timer queue or IO events)
-                self.tasks.insert(task, fut);
-            }
-        }
+        // if the task isn't yet ready, put it back on the task list.
+        // It's the task's responsibility to wake it self up (eg timer queue or IO events)
+        if fut.as_mut().poll(&mut cx).is_pending() {
+            self.tasks.insert(task, fut);
+        };
         ControlFlow::Continue(())
     }
 
