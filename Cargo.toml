@@ -1,6 +1,6 @@
 [package]
 name = "tl-async-runtime"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A bad runtime impl for educational purposes only"
 license = "MIT"
@@ -16,7 +16,7 @@ pin-project = "1.0"
 mio = { version = "0.8", features = ["os-poll", "net"] }
 chashmap = "2.2.2"
 parking_lot = "0.12"
-tokio = "1"
+tokio = "1" # might be cheating. I'm using tokio's AsyncRead/Write traits and helpers
 bytemuck = "1"
 
 [dev-dependencies]

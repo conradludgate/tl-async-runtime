@@ -60,9 +60,11 @@ impl Future for Sleep {
 
     fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
         let instant = *self.project().instant;
+        // if the future is not yet ready
         if instant > Instant::now() {
             task_context(|id| {
                 executor_context(|exec| {
+                    // register the timer on the executor
                     exec.timers.insert(instant, id);
                     Poll::Pending
                 })

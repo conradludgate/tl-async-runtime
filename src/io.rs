@@ -22,15 +22,12 @@ impl Event {
         self.0 & 2 != 0
     }
 }
+
 impl From<&mio::event::Event> for Event {
     fn from(e: &mio::event::Event) -> Self {
         let mut event = 0;
-        if e.is_readable() {
-            event |= 1;
-        }
-        if e.is_writable() {
-            event |= 2;
-        }
+        event |= (e.is_readable() as u8) << 1;
+        event |= (e.is_writable() as u8) << 2;
         Event(event)
     }
 }
@@ -52,6 +49,7 @@ impl Default for Os {
 }
 
 impl Os {
+    /// Polls the OS for new events, and dispatches those to any awaiting tasks
     pub(crate) fn process(&mut self) {
         let Self {
             poll,
@@ -74,6 +72,7 @@ pub(crate) struct Registration<S: Source> {
     pub source: S,
 }
 
+// allow internal access to the source
 impl<S: Source> Deref for Registration<S> {
     type Target = S;
 
@@ -91,11 +90,8 @@ impl<S: Source> Registration<S> {
     pub fn new(mut source: S, interests: mio::Interest) -> std::io::Result<Self> {
         executor_context(|exec| {
             let token = mio::Token(rand::thread_rng().gen());
-            exec.os
-                .lock()
-                .poll
-                .registry()
-                .register(&mut source, token, interests)?;
+            let os = exec.os.lock();
+            os.poll.registry().register(&mut source, token, interests)?;
             Ok(Self {
                 exec: exec.clone(),
                 token,
@@ -104,7 +100,9 @@ impl<S: Source> Registration<S> {
         })
     }
 
-    pub fn ready(&self) -> UnboundedReceiver<Event> {
+    // register this token on the event dispatcher
+    // and return a receiver to it
+    pub fn events(&self) -> UnboundedReceiver<Event> {
         let (sender, receiver) = unbounded();
         self.exec.os.lock().tasks.insert(self.token, sender);
         receiver
@@ -113,12 +111,10 @@ impl<S: Source> Registration<S> {
 
 impl<S: Source> Drop for Registration<S> {
     fn drop(&mut self) {
-        self.exec
-            .os
-            .lock()
-            .poll
-            .registry()
-            .deregister(&mut self.source)
-            .unwrap();
+        let mut os = self.exec.os.lock();
+        // deregister the source from the OS
+        os.poll.registry().deregister(&mut self.source).unwrap();
+        // remove the event dispatcher
+        os.tasks.remove(&self.token);
     }
 }

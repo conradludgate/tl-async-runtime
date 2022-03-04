@@ -1,6 +1,5 @@
 use std::{
     io::{self, Read, Write},
-    mem::MaybeUninit,
     net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
@@ -28,7 +27,7 @@ impl TcpListener {
     /// Accept a new TcpStream to communicate with
     pub async fn accept(&self) -> std::io::Result<(TcpStream, SocketAddr)> {
         loop {
-            self.registration.ready().next().await;
+            self.registration.events().next().await;
             match self.registration.accept() {
                 Ok((stream, socket)) => break Ok((TcpStream::from_mio(stream)?, socket)),
                 Err(e) if e.kind() != std::io::ErrorKind::WouldBlock => break Err(e),
@@ -42,29 +41,31 @@ impl TcpListener {
 #[pin_project]
 pub struct TcpStream {
     registration: Registration<mio::net::TcpStream>,
+
     readable: Option<()>,
     writeable: Option<()>,
 
     #[pin]
-    ready: UnboundedReceiver<Event>,
+    events: UnboundedReceiver<Event>,
 }
 
 impl TcpStream {
     pub(crate) fn from_mio(stream: mio::net::TcpStream) -> std::io::Result<Self> {
+        // register the stream to the OS
         let registration =
             super::Registration::new(stream, mio::Interest::READABLE | mio::Interest::WRITABLE)?;
-        let ready = registration.ready();
+        let events = registration.events();
         Ok(Self {
             registration,
             readable: Some(()),
             writeable: Some(()),
-            ready,
+            events,
         })
     }
 
     fn poll_event(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut this = self.as_mut().project();
-        let event = match this.ready.as_mut().poll_next(cx) {
+        let event = match this.events.as_mut().poll_next(cx) {
             Poll::Ready(Some(event)) => event,
             Poll::Ready(None) => {
                 return Poll::Ready(Err(io::Error::new(
@@ -92,26 +93,28 @@ impl AsyncRead for TcpStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         loop {
+            // if the stream is readable
             if let Some(()) = self.readable.take() {
-                unsafe {
-                    let b = slice_assume_init_mut(buf.unfilled_mut());
-                    match self.registration.read(b) {
-                        Ok(n) => {
-                            buf.assume_init(n);
-                            buf.advance(n);
-                            self.readable = Some(());
-                            return Poll::Ready(Ok(()));
-                        }
-                        Err(e) if e.kind() != std::io::ErrorKind::WouldBlock => {
-                            return Poll::Ready(Err(e))
-                        }
-                        _ => {}
+                // try read some bytes
+                let b = buf.initialize_unfilled();
+                match self.registration.read(b) {
+                    Ok(n) => {
+                        // if bytes were read, mark them
+                        buf.advance(n);
+                        // ensure that we attempt another read next time
+                        // since no new readable events will come through
+                        self.readable = Some(());
+                        return Poll::Ready(Ok(()));
                     }
+                    // if reading would block the thread, continue to event polling
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    // if there was some other io error, bail
+                    Err(e) => return Poll::Ready(Err(e)),
                 }
             }
 
-            match self.as_mut().poll_event(cx) {
-                Poll::Ready(_) => {}
+            match self.as_mut().poll_event(cx)? {
+                Poll::Ready(()) => {}
                 Poll::Pending => return Poll::Pending,
             }
         }
@@ -125,22 +128,25 @@ impl AsyncWrite for TcpStream {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         loop {
+            // if the stream is writeable
             if let Some(()) = self.writeable.take() {
+                // try write some bytes
                 match self.registration.write(buf) {
                     Ok(n) => {
+                        // ensure that we attempt another write next time
+                        // since no new writeable events will come through
                         self.writeable = Some(());
                         return Poll::Ready(Ok(n));
                     }
-                    Err(e) if e.kind() != std::io::ErrorKind::WouldBlock => {
-                        return Poll::Ready(Err(e))
-                    }
-                    _ => {}
+                    // if writing would block the thread, continue to event polling
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    // if there was some other io error, bail
+                    Err(e) => return Poll::Ready(Err(e)),
                 }
             }
-            // self.registration.reregister(mio::Interest::WRITABLE)?;
 
-            match self.as_mut().poll_event(cx) {
-                Poll::Ready(_) => {}
+            match self.as_mut().poll_event(cx)? {
+                Poll::Ready(()) => {}
                 Poll::Pending => return Poll::Pending,
             }
         }
@@ -148,29 +154,32 @@ impl AsyncWrite for TcpStream {
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         loop {
+            // if the stream is writeable
             if let Some(()) = self.writeable.take() {
+                // try flush the bytes
                 match self.registration.flush() {
-                    Ok(n) => return Poll::Ready(Ok(n)),
-                    Err(e) if e.kind() != std::io::ErrorKind::WouldBlock => {
-                        return Poll::Ready(Err(e))
+                    Ok(()) => {
+                        // ensure that we attempt another write next time
+                        // since no new writeable events will come through
+                        self.writeable = Some(());
+                        return Poll::Ready(Ok(()));
                     }
-                    _ => {}
+                    // if flushing would block the thread, continue to event polling
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    // if there was some other io error, bail
+                    Err(e) => return Poll::Ready(Err(e)),
                 }
             }
 
-            match self.as_mut().poll_event(cx) {
-                Poll::Ready(_) => {}
+            match self.as_mut().poll_event(cx)? {
+                Poll::Ready(()) => {}
                 Poll::Pending => return Poll::Pending,
             }
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Poll::Ready(Ok(()))
+        // shutdowns are immediate
+        Poll::Ready(self.registration.shutdown(std::net::Shutdown::Write))
     }
-}
-
-// TODO: This could use `MaybeUninit::slice_assume_init_mut` when it is stable.
-unsafe fn slice_assume_init_mut(slice: &mut [MaybeUninit<u8>]) -> &mut [u8] {
-    &mut *(slice as *mut [MaybeUninit<u8>] as *mut [u8])
 }

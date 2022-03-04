@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use chashmap::CHashMap;
 use driver::executor_context;
 use futures::channel::oneshot;
@@ -22,12 +24,6 @@ pub mod timers;
 
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Debug, PartialOrd, Ord)]
 struct TaskId(usize);
-
-impl TaskId {
-    fn new() -> Self {
-        Self(rand::thread_rng().gen())
-    }
-}
 
 type Task = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
 #[derive(Default)]
@@ -74,8 +70,8 @@ impl Executor {
         F: Future + Send + Sync + 'static,
         F::Output: Send + Sync + 'static,
     {
-        // get a new task id and channel to send the results over
-        let id = TaskId::new();
+        // get a random task id and channel to send the results over
+        let id = TaskId(rand::thread_rng().gen());
         let (sender, receiver) = oneshot::channel();
 
         // Pin the future. Also wrap it s.t. it sends it's output over the channel
