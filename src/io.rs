@@ -59,7 +59,9 @@ impl Default for Os {
 
 impl Os {
     /// Polls the OS for new events, and dispatches those to any awaiting tasks
-    pub(crate) fn process(&self) {
+    pub(crate) fn process(&self) -> usize {
+        let mut n = 0;
+
         self.poll
             .write()
             .poll(&mut self.events.write(), Some(Duration::from_micros(100)))
@@ -70,6 +72,7 @@ impl Os {
         for event in &*self.events.read() {
             if let Some(sender) = self.tasks.get(&event.token()) {
                 if sender.unbounded_send(event.into()).is_err() {
+                    n += 1;
                     remove.push(event.token());
                 }
             }
@@ -78,6 +81,8 @@ impl Os {
         for token in remove {
             self.tasks.remove(&token);
         }
+
+        n
     }
 }
 

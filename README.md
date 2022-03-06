@@ -76,11 +76,11 @@ I got the following results:
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    74.60ms   14.36ms 121.25ms   56.62%
-    Req/Sec    99.01     77.57   282.00     40.56%
-  15800 requests in 20.06s, 2.29MB read
-Requests/sec:    787.69
-Transfer/sec:    116.92KB
+    Latency    74.62ms   14.46ms 101.35ms   57.84%
+    Req/Sec   107.43     67.91   250.00     61.36%
+  10708 requests in 20.07s, 1.55MB read
+Requests/sec:    533.55
+Transfer/sec:     79.20KB
 ```
 
 #### Tokio

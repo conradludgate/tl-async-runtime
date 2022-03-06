@@ -1,7 +1,8 @@
 use std::{
+    cmp::Reverse,
     pin::Pin,
     task::{Context, Poll},
-    time::{Duration, Instant}, cmp::Reverse,
+    time::{Duration, Instant},
 };
 
 use futures::Future;

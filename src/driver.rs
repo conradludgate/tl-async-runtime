@@ -3,7 +3,7 @@ use crossbeam_channel::TryRecvError;
 use std::{
     cell::RefCell,
     ops::ControlFlow,
-    sync::{Arc, atomic::Ordering},
+    sync::{atomic::Ordering, Arc},
     task::{Context, Poll, Wake, Waker},
     thread,
 };
@@ -40,17 +40,17 @@ impl Wake for TaskWaker {
 
 impl Executor {
     fn park_thread(&self) {
-        // before doing any work and potentially getting parked, ensure any
+        // before getting parked, ensure any
         // waiting tasks are promoted to ready
-        self.book_keeping();
-
-        // Skip if parking would cause all threads to be parked.
-        // We need at least 1 thread running the books.
-        let parked = self.parked.fetch_add(1, Ordering::Relaxed);
-        if parked + 1 < self.threads.read().len() {
-            thread::park();
+        if self.book_keeping() == 0 {
+            // Skip if parking would cause all threads to be parked.
+            // We need at least 1 thread running the books.
+            let parked = self.parked.fetch_add(1, Ordering::Relaxed);
+            if parked + 1 < self.threads.read().len() {
+                thread::park();
+            }
+            self.parked.fetch_sub(1, Ordering::Release);
         }
-        self.parked.fetch_sub(1, Ordering::Release);
     }
 
     /// Get a single task from the queue.
@@ -67,6 +67,7 @@ impl Executor {
                 // if no tasks are available, park the thread.
                 // threads are woken up randomly when new tasks become available
                 self.park_thread();
+
                 ControlFlow::Continue(None)
             }
             Err(TryRecvError::Disconnected) => {

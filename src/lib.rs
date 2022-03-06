@@ -85,14 +85,16 @@ impl Executor {
 
     // this is run by any thread that currently is not busy.
     // It manages the timers and OS polling in order to wake up tasks
-    fn book_keeping(&self) {
+    fn book_keeping(&self) -> usize {
+        let mut n = 0;
         // get the current task timers that have elapsed and insert them into the ready tasks
         for id in &self.timers {
             self.signal_ready(id);
+            n += 1;
         }
 
         // get the OS events
-        self.os.process()
+        n + self.os.process()
     }
 
     /// Run a future to completion.
