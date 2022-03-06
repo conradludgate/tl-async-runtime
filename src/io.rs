@@ -68,7 +68,6 @@ impl Os {
 
         for event in &*events {
             if let Some(sender) = tasks.get(&event.token()) {
-                // dbg!(event);
                 if sender.unbounded_send(event.into()).is_err() {
                     tasks.remove(&event.token());
                 }
