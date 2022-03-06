@@ -1,9 +1,7 @@
 use std::{
-    cmp::Reverse,
-    collections::BinaryHeap,
     pin::Pin,
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::{Duration, Instant}, cmp::Reverse,
 };
 
 use futures::Future;
@@ -15,12 +13,18 @@ use crate::{
     TaskId,
 };
 
-type TimerHeap = BinaryHeap<(Reverse<Instant>, TaskId)>;
+type TimerQueue = PriorityQueue<TaskId, Reverse<Instant>>;
 #[derive(Default)]
-pub(crate) struct Queue(Mutex<TimerHeap>);
+pub(crate) struct Queue(Mutex<TimerQueue>);
 impl Queue {
     pub fn insert(&self, instant: Instant, task: TaskId) {
-        self.0.lock().push((Reverse(instant), task));
+        let entry = PriorityQueueEntry(task, Reverse(instant));
+        let mut queue = self.0.lock();
+        let index = match queue.binary_search(&entry) {
+            Ok(index) => index,
+            Err(index) => index,
+        };
+        queue.insert(index, entry);
     }
 }
 
@@ -33,14 +37,14 @@ impl<'a> IntoIterator for &'a Queue {
     }
 }
 
-pub(crate) struct QueueIter<'a>(MutexGuard<'a, TimerHeap>, Instant);
+pub(crate) struct QueueIter<'a>(MutexGuard<'a, TimerQueue>, Instant);
 impl<'a> Iterator for QueueIter<'a> {
     type Item = TaskId;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (Reverse(time), task) = self.0.pop()?;
+        let PriorityQueueEntry(task, Reverse(time)) = self.0.pop()?;
         if time > self.1 {
-            self.0.push((Reverse(time), task));
+            self.0.push(PriorityQueueEntry(task, Reverse(time)));
             None
         } else {
             Some(task)
@@ -85,3 +89,24 @@ impl Sleep {
         Sleep::until(Instant::now() + duration)
     }
 }
+
+struct PriorityQueueEntry<I, P>(I, P);
+impl<I, P: PartialEq> PartialEq for PriorityQueueEntry<I, P> {
+    fn eq(&self, other: &Self) -> bool {
+        self.1 == other.1
+    }
+}
+impl<I, P: Eq> Eq for PriorityQueueEntry<I, P> {}
+impl<I, P: PartialOrd> PartialOrd for PriorityQueueEntry<I, P> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.1.partial_cmp(&other.1)
+    }
+}
+
+impl<I, P: Ord> Ord for PriorityQueueEntry<I, P> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.1.cmp(&other.1)
+    }
+}
+
+type PriorityQueue<I, P> = Vec<PriorityQueueEntry<I, P>>;

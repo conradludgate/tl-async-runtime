@@ -15,12 +15,21 @@ use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
 use http::{header::HeaderValue, Request, Response, StatusCode};
 use httpdate::HttpDate;
+use rand::Rng;
 use serde::Serialize;
-use std::{env, error::Error, fmt, io, net::SocketAddr, str::FromStr, time::SystemTime};
+use std::{
+    env,
+    error::Error,
+    fmt, io,
+    net::SocketAddr,
+    str::FromStr,
+    time::{Duration, SystemTime},
+};
 use tl_async_runtime::{
     block_on,
     io::net::{TcpListener, TcpStream},
     spawn,
+    timers::Sleep,
 };
 use tokio_util::codec::{Decoder, Encoder, Framed};
 
@@ -66,6 +75,8 @@ async fn respond(
     req: Request<()>,
 ) -> Result<Response<String>, Box<dyn Error + Send + Sync + 'static>> {
     let mut response = Response::builder();
+    let ms = rand::thread_rng().gen_range(50..100);
+    Sleep::duration(Duration::from_millis(ms)).await;
     let body = match req.uri().path() {
         "/plaintext" => {
             response = response.header("Content-Type", "text/plain");

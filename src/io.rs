@@ -2,11 +2,12 @@
 pub mod net;
 
 use crate::{driver::executor_context, Executor};
+use chashmap::CHashMap;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use mio::event::Source;
+use parking_lot::RwLock;
 use rand::Rng;
 use std::{
-    collections::HashMap,
     ops::{Deref, DerefMut},
     sync::Arc,
     time::Duration,
@@ -41,37 +42,41 @@ impl From<&mio::event::Event> for Event {
 }
 
 pub(crate) struct Os {
-    pub poll: mio::Poll,
-    pub events: mio::Events,
-    pub tasks: HashMap<mio::Token, UnboundedSender<Event>>,
+    pub poll: RwLock<mio::Poll>,
+    pub events: RwLock<mio::Events>,
+    pub tasks: CHashMap<mio::Token, UnboundedSender<Event>>,
 }
 
 impl Default for Os {
     fn default() -> Self {
         Self {
-            poll: mio::Poll::new().unwrap(),
-            events: mio::Events::with_capacity(128),
-            tasks: HashMap::new(),
+            poll: RwLock::new(mio::Poll::new().unwrap()),
+            events: RwLock::new(mio::Events::with_capacity(128)),
+            tasks: CHashMap::new(),
         }
     }
 }
 
 impl Os {
     /// Polls the OS for new events, and dispatches those to any awaiting tasks
-    pub(crate) fn process(&mut self) {
-        let Self {
-            poll,
-            events,
-            tasks,
-        } = self;
-        poll.poll(events, Some(Duration::from_millis(1))).unwrap();
+    pub(crate) fn process(&self) {
+        self.poll
+            .write()
+            .poll(&mut self.events.write(), Some(Duration::from_micros(100)))
+            .unwrap();
 
-        for event in &*events {
-            if let Some(sender) = tasks.get(&event.token()) {
+        let mut remove = vec![];
+
+        for event in &*self.events.read() {
+            if let Some(sender) = self.tasks.get(&event.token()) {
                 if sender.unbounded_send(event.into()).is_err() {
-                    tasks.remove(&event.token());
+                    remove.push(event.token());
                 }
             }
+        }
+
+        for token in remove {
+            self.tasks.remove(&token);
         }
     }
 }
@@ -100,8 +105,11 @@ impl<S: Source> Registration<S> {
     pub fn new(mut source: S, interests: mio::Interest) -> std::io::Result<Self> {
         executor_context(|exec| {
             let token = mio::Token(rand::thread_rng().gen());
-            let os = exec.os.lock();
-            os.poll.registry().register(&mut source, token, interests)?;
+            exec.os
+                .poll
+                .read()
+                .registry()
+                .register(&mut source, token, interests)?;
             Ok(Self {
                 exec: exec.clone(),
                 token,
@@ -114,17 +122,22 @@ impl<S: Source> Registration<S> {
     // and return a receiver to it
     pub fn events(&self) -> UnboundedReceiver<Event> {
         let (sender, receiver) = unbounded();
-        self.exec.os.lock().tasks.insert(self.token, sender);
+        self.exec.os.tasks.insert(self.token, sender);
         receiver
     }
 }
 
 impl<S: Source> Drop for Registration<S> {
     fn drop(&mut self) {
-        let mut os = self.exec.os.lock();
         // deregister the source from the OS
-        os.poll.registry().deregister(&mut self.source).unwrap();
+        self.exec
+            .os
+            .poll
+            .read()
+            .registry()
+            .deregister(&mut self.source)
+            .unwrap();
         // remove the event dispatcher
-        os.tasks.remove(&self.token);
+        self.exec.os.tasks.remove(&self.token);
     }
 }

@@ -76,11 +76,11 @@ I got the following results:
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.50ms  160.95us  12.45ms   95.11%
-    Req/Sec     1.73k     0.99k    3.10k    37.17%
-  103290 requests in 20.05s, 14.97MB read
-Requests/sec:   5150.41
-Transfer/sec:    764.51KB
+    Latency    74.60ms   14.36ms 121.25ms   56.62%
+    Req/Sec    99.01     77.57   282.00     40.56%
+  15800 requests in 20.06s, 2.29MB read
+Requests/sec:    787.69
+Transfer/sec:    116.92KB
 ```
 
 #### Tokio
@@ -88,11 +88,11 @@ Transfer/sec:    764.51KB
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    95.07ms  152.83ms   1.93s    85.96%
-    Req/Sec     4.58k     2.48k    8.91k    62.16%
-  1084726 requests in 20.05s, 157.24MB read
-Requests/sec:  54101.15
-Transfer/sec:      7.84MB
+    Latency   126.05ms   43.62ms 274.81ms   57.92%
+    Req/Sec   325.58     40.00   430.00     74.61%
+  77921 requests in 20.07s, 11.30MB read
+Requests/sec:   3882.07
+Transfer/sec:    576.25KB
 ```
 
 ### Single threaded
@@ -102,11 +102,11 @@ Transfer/sec:      7.84MB
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     4.01ms  314.68us  30.34ms   91.31%
-    Req/Sec     1.43k   761.11     3.40k    49.88%
-  114121 requests in 20.06s, 16.54MB read
-Requests/sec:   5688.68
-Transfer/sec:    844.41KB
+    Latency    74.75ms   14.53ms 137.04ms   57.81%
+    Req/Sec   137.25     83.36   340.00     67.56%
+  21907 requests in 20.08s, 3.18MB read
+Requests/sec:   1090.72
+Transfer/sec:    161.90KB
 ```
 
 #### Tokio
@@ -114,27 +114,25 @@ Transfer/sec:    844.41KB
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    41.82ms    1.33ms  60.03ms   93.04%
-    Req/Sec     0.98k   122.88     1.24k    58.54%
-  235139 requests in 20.08s, 34.09MB read
-Requests/sec:  11711.46
-Transfer/sec:      1.70MB
+    Latency   126.14ms   43.27ms 220.68ms   57.62%
+    Req/Sec   325.27     38.86   440.00     73.58%
+  77761 requests in 20.04s, 11.27MB read
+Requests/sec:   3879.42
+Transfer/sec:    575.85KB
 ```
 
 ### Conclusion
 
-Tokio's single-threaded performance has 2x the throughput, and 10x the throughput when multi-threaded.
-It also has 10x the single-threaded latency and 50x when multi-threaded.
+Tokio's has a similar latency and roughly 4x the throughput
 
-This is expected. Using [lines of code](https://gist.github.com/conradludgate/417ef86f1764b41606f400de247692bf) as an estimate for complexity, tokio is ~60x more complex.
-This would account for the longer latencies of bookkeeping and a more highly tuned runtime to support more req/s.
-
-I consider this to be a success.
-We have created a runtime within an order of magnitude of tokio,
-while significantly simpler and easier to understand.
-
-Downside, this runtime seemingly is struggling to make good use of multiple threads.
+Tokio also has a similar multi-threaded vs single-threaded performance in this example.
+This runtime seems to have a degraded performance when attempting to use multiple threads.
 This may be a result of lock contensions as a result of not optimising the data structures.
+
+Using [lines of code](https://gist.github.com/conradludgate/417ef86f1764b41606f400de247692bf) as an estimate for complexity, tokio is ~60x more complex.
+
+I would consider this a decent attempt at a runtime. It's not the most effective but it certainly does good enough,
+especially for the intended goal of simplicity.
 
 ### Alternatives
 
@@ -144,9 +142,9 @@ When benchmarking a non-async version that uses an OS thread per active connecti
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    21.50ms   18.68ms 220.64ms   75.76%
-    Req/Sec   135.40k    46.30k  229.77k    68.06%
-  32206727 requests in 20.13s, 4.56GB read
-Requests/sec: 1599900.52
-Transfer/sec:    231.92MB
+    Latency    61.15ms   41.57ms 389.98ms   35.04%
+    Req/Sec    25.17k    15.52k   63.76k    59.01%
+  6013517 requests in 20.06s, 0.85GB read
+Requests/sec: 299715.59
+Transfer/sec:     43.45MB
 ```

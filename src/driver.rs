@@ -3,7 +3,7 @@ use crossbeam_channel::TryRecvError;
 use std::{
     cell::RefCell,
     ops::ControlFlow,
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
     task::{Context, Poll, Wake, Waker},
     thread,
 };
@@ -40,12 +40,17 @@ impl Wake for TaskWaker {
 
 impl Executor {
     fn park_thread(&self) {
+        // before doing any work and potentially getting parked, ensure any
+        // waiting tasks are promoted to ready
+        self.book_keeping();
+
         // Skip if parking would cause all threads to be parked.
         // We need at least 1 thread running the books.
-        if Arc::strong_count(&self.parked) + 1 < self.threads.read().len() {
-            let _park = self.parked.clone(); // increment the counter. decrements automatically
+        let parked = self.parked.fetch_add(1, Ordering::Relaxed);
+        if parked + 1 < self.threads.read().len() {
             thread::park();
         }
+        self.parked.fetch_sub(1, Ordering::Release);
     }
 
     /// Get a single task from the queue.
@@ -76,10 +81,6 @@ impl Executor {
     /// Parks if there are no tasks available.
     /// Returns Break if the task queue is broken.
     pub(crate) fn run_task(self: &Arc<Self>) -> ControlFlow<()> {
-        // before doing any work and potentially getting parked, ensure any
-        // waiting tasks are promoted to ready
-        self.book_keeping();
-
         // remove a task from the ledger to work on
         let (task, mut fut) = match self.acquire_task()? {
             Some(task) => task,

@@ -4,12 +4,13 @@ use chashmap::CHashMap;
 use driver::executor_context;
 use futures::channel::oneshot;
 use futures::{pin_mut, FutureExt};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use pin_project::pin_project;
 use rand::Rng;
 use std::future::Future;
 use std::ops::ControlFlow;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
@@ -28,12 +29,13 @@ struct TaskId(usize);
 type Task = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
 #[derive(Default)]
 struct Executor {
+    threadn: AtomicUsize,
     threads: RwLock<Vec<Thread>>,
     tasks: CHashMap<TaskId, Task>,
     timers: timers::Queue,
     ready: ready::Queue,
-    os: Mutex<io::Os>,
-    parked: Arc<()>,
+    os: io::Os,
+    parked: AtomicUsize,
 }
 
 #[pin_project]
@@ -56,9 +58,9 @@ impl Executor {
 
         // get a 'random' thread from the loop and wake it up.
         // does nothing if the thread is not parked.
-        let mut threads = self.threads.write();
-        threads.rotate_left(1);
-        threads[0].unpark();
+        let threadn = self.threadn.fetch_add(1, Ordering::Relaxed);
+        let threads = self.threads.read();
+        threads[threadn % threads.len()].unpark();
     }
 
     /// Spawns a task in this executor
@@ -90,8 +92,7 @@ impl Executor {
         }
 
         // get the OS events
-        let mut os = self.os.lock();
-        os.process()
+        self.os.process()
     }
 
     /// Run a future to completion.
