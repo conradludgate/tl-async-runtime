@@ -6,6 +6,7 @@ use std::{
 };
 
 use futures::{channel::mpsc::UnboundedReceiver, Stream, StreamExt};
+use mio::Interest;
 use pin_project::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -20,7 +21,7 @@ impl TcpListener {
     /// Create a new TcpListener bound to the socket
     pub fn bind(addr: SocketAddr) -> std::io::Result<Self> {
         let listener = mio::net::TcpListener::bind(addr)?;
-        let registration = super::Registration::new(listener, mio::Interest::READABLE)?;
+        let registration = Registration::new(listener, Interest::READABLE)?;
         Ok(Self { registration })
     }
 
@@ -30,8 +31,8 @@ impl TcpListener {
             self.registration.events().next().await;
             match self.registration.accept() {
                 Ok((stream, socket)) => break Ok((TcpStream::from_mio(stream)?, socket)),
-                Err(e) if e.kind() != std::io::ErrorKind::WouldBlock => break Err(e),
-                _ => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => break Err(e),
             }
         }
     }
@@ -43,7 +44,7 @@ pub struct TcpStream {
     registration: Registration<mio::net::TcpStream>,
 
     readable: Option<()>,
-    writeable: Option<()>,
+    writable: Option<()>,
 
     #[pin]
     events: UnboundedReceiver<Event>,
@@ -52,13 +53,12 @@ pub struct TcpStream {
 impl TcpStream {
     pub(crate) fn from_mio(stream: mio::net::TcpStream) -> std::io::Result<Self> {
         // register the stream to the OS
-        let registration =
-            super::Registration::new(stream, mio::Interest::READABLE | mio::Interest::WRITABLE)?;
+        let registration = Registration::new(stream, Interest::READABLE | Interest::WRITABLE)?;
         let events = registration.events();
         Ok(Self {
             registration,
             readable: Some(()),
-            writeable: Some(()),
+            writable: Some(()),
             events,
         })
     }
@@ -80,7 +80,7 @@ impl TcpStream {
             *this.readable = Some(());
         }
         if event.is_writable() {
-            *this.writeable = Some(());
+            *this.writable = Some(());
         }
         Poll::Ready(Ok(()))
     }
@@ -103,6 +103,7 @@ impl AsyncRead for TcpStream {
                         buf.advance(n);
                         // ensure that we attempt another read next time
                         // since no new readable events will come through
+                        // https://docs.rs/mio/0.8.0/mio/struct.Poll.html#draining-readiness
                         self.readable = Some(());
                         return Poll::Ready(Ok(()));
                     }
@@ -129,13 +130,14 @@ impl AsyncWrite for TcpStream {
     ) -> Poll<std::io::Result<usize>> {
         loop {
             // if the stream is writeable
-            if let Some(()) = self.writeable.take() {
+            if let Some(()) = self.writable.take() {
                 // try write some bytes
                 match self.registration.write(buf) {
                     Ok(n) => {
                         // ensure that we attempt another write next time
                         // since no new writeable events will come through
-                        self.writeable = Some(());
+                        // https://docs.rs/mio/0.8.0/mio/struct.Poll.html#draining-readiness
+                        self.writable = Some(());
                         return Poll::Ready(Ok(n));
                     }
                     // if writing would block the thread, continue to event polling
@@ -155,13 +157,14 @@ impl AsyncWrite for TcpStream {
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         loop {
             // if the stream is writeable
-            if let Some(()) = self.writeable.take() {
+            if let Some(()) = self.writable.take() {
                 // try flush the bytes
                 match self.registration.flush() {
                     Ok(()) => {
                         // ensure that we attempt another write next time
                         // since no new writeable events will come through
-                        self.writeable = Some(());
+                        // https://docs.rs/mio/0.8.0/mio/struct.Poll.html#draining-readiness
+                        self.writable = Some(());
                         return Poll::Ready(Ok(()));
                     }
                     // if flushing would block the thread, continue to event polling

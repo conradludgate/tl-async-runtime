@@ -37,10 +37,7 @@ struct Executor {
 }
 
 #[pin_project]
-pub struct SpawnHandle<R> {
-    #[pin]
-    receiver: oneshot::Receiver<R>,
-}
+pub struct SpawnHandle<R>(#[pin] oneshot::Receiver<R>);
 
 impl<R> Future for SpawnHandle<R> {
     type Output = R;
@@ -48,7 +45,7 @@ impl<R> Future for SpawnHandle<R> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
         // poll the inner channel for the spawned future's result
-        this.receiver.as_mut().poll(cx).map(|x| x.unwrap())
+        this.0.as_mut().poll(cx).map(|x| x.unwrap())
     }
 }
 
@@ -81,7 +78,7 @@ impl Executor {
         self.signal_ready(id);
 
         // return the handle to the reciever so that it can be `await`ed with it's output value
-        SpawnHandle { receiver }
+        SpawnHandle(receiver)
     }
 
     // this is run by any thread that currently is not busy.
@@ -109,7 +106,8 @@ impl Executor {
         self.register();
 
         // spawn a bunch of worker threads
-        for i in 1..8 {
+        let threads = thread::available_parallelism().map_or(4, |t| t.get());
+        for i in 1..threads {
             let exec = self.clone();
             thread::Builder::new()
                 .name(format!("tl-async-runtime-worker-{}", i))
@@ -148,9 +146,6 @@ struct ThreadWaker(Thread);
 
 impl Wake for ThreadWaker {
     fn wake(self: Arc<Self>) {
-        self.wake_by_ref();
-    }
-    fn wake_by_ref(self: &Arc<Self>) {
         self.0.unpark();
     }
 }
@@ -174,6 +169,5 @@ where
     F: Future<Output = R> + Send + Sync + 'static,
     R: Send + Sync + 'static,
 {
-    let executor = Arc::new(Executor::default());
-    executor.block_on(fut)
+    Arc::new(Executor::default()).block_on(fut)
 }
