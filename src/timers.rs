@@ -1,7 +1,7 @@
 use std::{
     cmp::Reverse,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
     time::{Duration, Instant},
 };
 
@@ -9,16 +9,13 @@ use futures::Future;
 use parking_lot::{Mutex, MutexGuard};
 use pin_project::pin_project;
 
-use crate::{
-    driver::{executor_context, task_context},
-    TaskId,
-};
+use crate::driver::executor_context;
 
-type TimerQueue = PriorityQueue<TaskId, Reverse<Instant>>;
+type TimerQueue = PriorityQueue<Waker, Reverse<Instant>>;
 #[derive(Default)]
 pub(crate) struct Queue(Mutex<TimerQueue>);
 impl Queue {
-    pub fn insert(&self, instant: Instant, task: TaskId) {
+    pub fn insert(&self, instant: Instant, task: Waker) {
         let entry = PriorityQueueEntry(task, Reverse(instant));
         let mut queue = self.0.lock();
         let index = match queue.binary_search(&entry) {
@@ -30,7 +27,7 @@ impl Queue {
 }
 
 impl<'a> IntoIterator for &'a Queue {
-    type Item = TaskId;
+    type Item = Waker;
     type IntoIter = QueueIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -40,7 +37,7 @@ impl<'a> IntoIterator for &'a Queue {
 
 pub(crate) struct QueueIter<'a>(MutexGuard<'a, TimerQueue>, Instant);
 impl<'a> Iterator for QueueIter<'a> {
-    type Item = TaskId;
+    type Item = Waker;
 
     fn next(&mut self) -> Option<Self::Item> {
         let PriorityQueueEntry(task, Reverse(time)) = self.0.pop()?;
@@ -63,17 +60,12 @@ pub struct Sleep {
 impl Future for Sleep {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let instant = *self.project().instant;
         // if the future is not yet ready
         if instant > Instant::now() {
-            task_context(|id| {
-                executor_context(|exec| {
-                    // register the timer on the executor
-                    exec.timers.insert(instant, id);
-                    Poll::Pending
-                })
-            })
+            executor_context(|exec| exec.timers.insert(instant, cx.waker().clone()));
+            Poll::Pending
         } else {
             Poll::Ready(())
         }

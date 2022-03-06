@@ -1,12 +1,10 @@
 #![forbid(unsafe_code)]
 
-use chashmap::CHashMap;
 use driver::executor_context;
 use futures::channel::oneshot;
 use futures::{pin_mut, FutureExt};
 use parking_lot::RwLock;
 use pin_project::pin_project;
-use rand::Rng;
 use std::future::Future;
 use std::ops::ControlFlow;
 use std::pin::Pin;
@@ -23,15 +21,11 @@ pub mod io;
 /// Timers used for pausing tasks for fixed durations
 pub mod timers;
 
-#[derive(Hash, PartialEq, Eq, Clone, Copy, Debug, PartialOrd, Ord)]
-struct TaskId(usize);
-
 type Task = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
 #[derive(Default)]
 struct Executor {
     threadn: AtomicUsize,
     threads: RwLock<Vec<Thread>>,
-    tasks: CHashMap<TaskId, Task>,
     timers: timers::Queue,
     ready: ready::Queue,
     os: io::Os,
@@ -53,8 +47,8 @@ impl<R> Future for SpawnHandle<R> {
 
 impl Executor {
     /// Signals that a task is now ready to be worked on
-    pub(crate) fn signal_ready(&self, id: TaskId) {
-        self.ready.push(id);
+    pub(crate) fn signal_ready(&self, task: Task) {
+        self.ready.push(task);
 
         // get a 'random' thread from the loop and wake it up.
         // does nothing if the thread is not parked.
@@ -69,15 +63,12 @@ impl Executor {
         F: Future + Send + Sync + 'static,
         F::Output: Send + Sync + 'static,
     {
-        // get a random task id and channel to send the results over
-        let id = TaskId(rand::thread_rng().gen());
         let (sender, receiver) = oneshot::channel();
 
         // Pin the future. Also wrap it s.t. it sends it's output over the channel
         let fut = Box::pin(fut.map(|out| sender.send(out).unwrap_or_default()));
         // insert the task into the runtime and signal that it is ready for processing
-        self.tasks.insert(id, fut);
-        self.signal_ready(id);
+        self.signal_ready(fut);
 
         // return the handle to the reciever so that it can be `await`ed with it's output value
         SpawnHandle(receiver)
@@ -88,8 +79,8 @@ impl Executor {
     fn book_keeping(&self) -> usize {
         let mut n = 0;
         // get the current task timers that have elapsed and insert them into the ready tasks
-        for id in &self.timers {
-            self.signal_ready(id);
+        for task in &self.timers {
+            task.wake();
             n += 1;
         }
 

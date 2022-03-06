@@ -1,20 +1,16 @@
-use crate::{Executor, Task, TaskId};
+use crate::{Executor, Task};
 use crossbeam_channel::TryRecvError;
+use parking_lot::Mutex;
 use std::{
     cell::RefCell,
     ops::ControlFlow,
     sync::{atomic::Ordering, Arc},
-    task::{Context, Poll, Wake, Waker},
+    task::{Context, Wake, Waker},
     thread,
 };
 
 thread_local! {
     static EXECUTOR: RefCell<Option<Arc<Executor>>> = RefCell::new(None);
-    static TASK_ID: RefCell<TaskId> = RefCell::new(TaskId(0));
-}
-
-pub(crate) fn task_context<R>(f: impl FnOnce(TaskId) -> R) -> R {
-    TASK_ID.with(|id| f(*id.borrow()))
 }
 
 pub(crate) fn executor_context<R>(f: impl FnOnce(&Arc<Executor>) -> R) -> R {
@@ -29,12 +25,14 @@ pub(crate) fn executor_context<R>(f: impl FnOnce(&Arc<Executor>) -> R) -> R {
 
 struct TaskWaker {
     executor: Arc<Executor>,
-    task: TaskId,
+    task: Arc<Mutex<Option<Task>>>,
 }
 
 impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
-        self.executor.signal_ready(self.task);
+        if let Some(task) = self.task.lock().take() {
+            self.executor.signal_ready(task);
+        }
     }
 }
 
@@ -57,12 +55,9 @@ impl Executor {
     ///
     /// Parks if there are no tasks available.
     /// Returns Break if the task queue is broken.
-    fn acquire_task(&self) -> ControlFlow<(), Option<(TaskId, Task)>> {
+    fn acquire_task(&self) -> ControlFlow<(), Option<Task>> {
         match self.ready.poll() {
-            Ok(task) => match self.tasks.remove(&task) {
-                Some(fut) => ControlFlow::Continue(Some((task, fut))),
-                None => ControlFlow::Continue(None),
-            },
+            Ok(task) => ControlFlow::Continue(Some(task)),
             Err(TryRecvError::Empty) => {
                 // if no tasks are available, park the thread.
                 // threads are woken up randomly when new tasks become available
@@ -83,29 +78,26 @@ impl Executor {
     /// Returns Break if the task queue is broken.
     pub(crate) fn run_task(self: &Arc<Self>) -> ControlFlow<()> {
         // remove a task from the ledger to work on
-        let (task, mut fut) = match self.acquire_task()? {
-            Some(task) => task,
+        let mut fut = match self.acquire_task()? {
+            Some(fut) => fut,
             None => return ControlFlow::Continue(()),
         };
 
-        // register the task id
-        TASK_ID.with(|id| *id.borrow_mut() = task);
+        let task_ref = Arc::new(Mutex::new(None));
 
         // Create a new waker for the current task.
         // When the wake is called, it tells the executor
         // that the task is once again ready for work
         // and will be picked up by an available thread
         let executor = self.clone();
-        let waker = Waker::from(Arc::new(TaskWaker { task, executor }));
+        let waker = Waker::from(Arc::new(TaskWaker {
+            task: task_ref.clone(),
+            executor,
+        }));
         let mut cx = Context::from_waker(&waker);
 
-        match fut.as_mut().poll(&mut cx) {
-            Poll::Ready(()) => {}
-            Poll::Pending => {
-                // if the task isn't yet ready, put it back on the task list.
-                // It's the task's responsibility to wake it self up (eg timer queue or IO events)
-                self.tasks.insert(task, fut);
-            }
+        if fut.as_mut().poll(&mut cx).is_pending() {
+            task_ref.lock().replace(fut);
         }
         ControlFlow::Continue(())
     }

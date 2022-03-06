@@ -40,11 +40,10 @@ There's only 2 steps to this:
 ### Timers
 
 The timers are very rudementary. When a timer is first polled, it
-gets the thread-local executor object and pushes a `(Time, TaskId)` pair
+gets the thread-local executor object and pushes a `(Time, Waker)` pair
 into a priority queue (ordered by time ascending).
 
-The book-keepers will loop through this priority queue and send the respective task IDs
-into the ready queue.
+The book-keepers will loop through this priority queue and call the respective wakers
 
 ### OS Events
 
