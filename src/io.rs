@@ -64,7 +64,7 @@ impl Os {
             events,
             tasks,
         } = self;
-        poll.poll(events, Some(Duration::from_millis(10))).unwrap();
+        poll.poll(events, Some(Duration::from_millis(1))).unwrap();
 
         for event in &*events {
             if let Some(sender) = tasks.get(&event.token()) {

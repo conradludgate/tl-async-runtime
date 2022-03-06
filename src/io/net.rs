@@ -45,7 +45,6 @@ pub struct TcpStream {
 
     readable: Option<()>,
     writable: Option<()>,
-    read_closed: bool,
 
     #[pin]
     events: UnboundedReceiver<Event>,
@@ -60,7 +59,6 @@ impl TcpStream {
             registration,
             readable: Some(()),
             writable: Some(()),
-            read_closed: false,
             events,
         })
     }
@@ -84,7 +82,6 @@ impl TcpStream {
         if event.is_writable() {
             *this.writable = Some(());
         }
-        *this.read_closed |= event.is_read_closed();
         Poll::Ready(Ok(()))
     }
 }
@@ -96,16 +93,12 @@ impl AsyncRead for TcpStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         loop {
-            if self.read_closed {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF")));
-            }
             // if the stream is readable
             if let Some(()) = self.readable.take() {
                 // try read some bytes
                 let b = buf.initialize_unfilled();
                 match self.registration.read(b) {
                     Ok(n) => {
-                        // eprintln!("{:?}", String::from_utf8_lossy(&b[..n]));
                         // if bytes were read, mark them
                         buf.advance(n);
                         // ensure that we attempt another read next time
@@ -143,6 +136,7 @@ impl AsyncWrite for TcpStream {
                     Ok(n) => {
                         // ensure that we attempt another write next time
                         // since no new writeable events will come through
+                        // https://docs.rs/mio/0.8.0/mio/struct.Poll.html#draining-readiness
                         self.writable = Some(());
                         return Poll::Ready(Ok(n));
                     }
@@ -169,6 +163,7 @@ impl AsyncWrite for TcpStream {
                     Ok(()) => {
                         // ensure that we attempt another write next time
                         // since no new writeable events will come through
+                        // https://docs.rs/mio/0.8.0/mio/struct.Poll.html#draining-readiness
                         self.writable = Some(());
                         return Poll::Ready(Ok(()));
                     }

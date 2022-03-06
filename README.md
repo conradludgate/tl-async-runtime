@@ -57,3 +57,50 @@ a hashmap.
 The book-keepers will poll the OS for new events. If a corresponding token is found in the hashmap,
 it will send the event along the channel. Since it's using a future-aware channel, it will auto-wake
 any tasks that are waiting for the event
+
+## Benchmark
+
+The [http-server](examples/http-server.rs) example was taken from [tokio's tinyhttp](https://github.com/tokio-rs/tokio/blob/e8ae65a697d04aa11d5587c45caf999cb3b7f36e/examples/tinyhttp.rs) example.
+I ran both of them and performed the following [wrk](https://github.com/wg/wrk) benchmark:
+
+```sh
+wrk -t12 -c500 -d20s http://localhost:8080/json
+```
+
+I got the following results:
+
+### tl-async-runtime
+```
+Running 20s test @ http://localhost:8080/json
+  12 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.50ms  160.95us  12.45ms   95.11%
+    Req/Sec     1.73k     0.99k    3.10k    37.17%
+  103290 requests in 20.05s, 14.97MB read
+Requests/sec:   5150.41
+Transfer/sec:    764.51KB
+```
+
+### Tokio
+```
+wrk -t12 -c500 -d20s http://localhost:8080/json
+Running 20s test @ http://localhost:8080/json
+  12 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    95.07ms  152.83ms   1.93s    85.96%
+    Req/Sec     4.58k     2.48k    8.91k    62.16%
+  1084726 requests in 20.05s, 157.24MB read
+Requests/sec:  54101.15
+Transfer/sec:      7.84MB
+```
+
+### Conclusion
+
+Tokio has 10x the average throughput, but has much higher average and max latencies.
+
+This is expected. Using [lines of code](https://gist.github.com/conradludgate/417ef86f1764b41606f400de247692bf) as an estimate for complexity, tokio is ~60x more complex.
+This would account for the longer latencies of bookkeeping and a more highly tuned runtime to support more req/s.
+
+I consider this to be a success.
+We have created a runtime within an order of magnitude of tokio,
+while significantly simpler and easier to understand.
