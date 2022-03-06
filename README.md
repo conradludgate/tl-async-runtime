@@ -69,7 +69,9 @@ wrk -t12 -c500 -d20s http://localhost:8080/json
 
 I got the following results:
 
-### tl-async-runtime
+### Multi threaded
+
+#### tl-async-runtime
 ```
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
@@ -81,9 +83,8 @@ Requests/sec:   5150.41
 Transfer/sec:    764.51KB
 ```
 
-### Tokio
+#### Tokio
 ```
-wrk -t12 -c500 -d20s http://localhost:8080/json
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
@@ -94,9 +95,36 @@ Requests/sec:  54101.15
 Transfer/sec:      7.84MB
 ```
 
+### Single threaded
+
+#### tl-async-runtime
+```
+Running 20s test @ http://localhost:8080/json
+  12 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     4.01ms  314.68us  30.34ms   91.31%
+    Req/Sec     1.43k   761.11     3.40k    49.88%
+  114121 requests in 20.06s, 16.54MB read
+Requests/sec:   5688.68
+Transfer/sec:    844.41KB
+```
+
+#### Tokio
+```
+Running 20s test @ http://localhost:8080/json
+  12 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    41.82ms    1.33ms  60.03ms   93.04%
+    Req/Sec     0.98k   122.88     1.24k    58.54%
+  235139 requests in 20.08s, 34.09MB read
+Requests/sec:  11711.46
+Transfer/sec:      1.70MB
+```
+
 ### Conclusion
 
-Tokio has 10x the average throughput, but has much higher average and max latencies.
+Tokio's single-threaded performance has 2x the throughput, and 10x the throughput when multi-threaded.
+It also has 10x the single-threaded latency and 50x when multi-threaded.
 
 This is expected. Using [lines of code](https://gist.github.com/conradludgate/417ef86f1764b41606f400de247692bf) as an estimate for complexity, tokio is ~60x more complex.
 This would account for the longer latencies of bookkeeping and a more highly tuned runtime to support more req/s.
@@ -104,3 +132,21 @@ This would account for the longer latencies of bookkeeping and a more highly tun
 I consider this to be a success.
 We have created a runtime within an order of magnitude of tokio,
 while significantly simpler and easier to understand.
+
+Downside, this runtime seemingly is struggling to make good use of multiple threads.
+This may be a result of lock contensions as a result of not optimising the data structures.
+
+### Alternatives
+
+When benchmarking a non-async version that uses an OS thread per active connection seems surprisingly effective on my 8-core Linux machine.
+
+```
+Running 20s test @ http://localhost:8080/json
+  12 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    21.50ms   18.68ms 220.64ms   75.76%
+    Req/Sec   135.40k    46.30k  229.77k    68.06%
+  32206727 requests in 20.13s, 4.56GB read
+Requests/sec: 1599900.52
+Transfer/sec:    231.92MB
+```
