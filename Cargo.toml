@@ -17,7 +17,6 @@ mio = { version = "0.8", features = ["os-poll", "net"] }
 chashmap = "2.2.2"
 parking_lot = "0.12"
 tokio = "1" # might be cheating. I'm using tokio's AsyncRead/Write traits and helpers
-bytemuck = "1"
 
 [dev-dependencies]
 tracing = "0.1"
