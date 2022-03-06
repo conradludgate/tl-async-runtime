@@ -36,11 +36,13 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         println!("Listening on: {}", addr);
 
         loop {
-            let (stream, _) = server.accept().await?;
+            let (stream, socket) = server.accept().await?;
+            eprintln!("connection from {socket}");
             spawn(async move {
                 if let Err(e) = process(stream).await {
                     println!("failed to process connection; error = {}", e);
                 }
+                eprintln!("closing connection from {socket}");
             });
         }
     })

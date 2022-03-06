@@ -16,10 +16,16 @@ use std::{
 pub(crate) struct Event(u8);
 impl Event {
     pub fn is_readable(&self) -> bool {
-        self.0 & 1 != 0
+        self.0 & 1 != 0 || self.is_read_closed()
     }
     pub fn is_writable(&self) -> bool {
-        self.0 & 2 != 0
+        self.0 & 2 != 0 || self.is_write_closed()
+    }
+    pub fn is_read_closed(&self) -> bool {
+        self.0 & 4 != 0
+    }
+    pub fn is_write_closed(&self) -> bool {
+        self.0 & 8 != 0
     }
 }
 
@@ -28,6 +34,8 @@ impl From<&mio::event::Event> for Event {
         let mut event = 0;
         event |= (e.is_readable() as u8) << 1;
         event |= (e.is_writable() as u8) << 2;
+        event |= (e.is_read_closed() as u8) << 3;
+        event |= (e.is_write_closed() as u8) << 4;
         Event(event)
     }
 }
@@ -60,7 +68,10 @@ impl Os {
 
         for event in &*events {
             if let Some(sender) = tasks.get(&event.token()) {
-                sender.unbounded_send(event.into()).unwrap();
+                // dbg!(event);
+                if sender.unbounded_send(event.into()).is_err() {
+                    tasks.remove(&event.token());
+                }
             }
         }
     }
