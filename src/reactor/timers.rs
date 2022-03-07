@@ -64,7 +64,7 @@ impl Future for Sleep {
         let instant = *self.project().instant;
         // if the future is not yet ready
         if instant > Instant::now() {
-            executor_context(|exec| exec.timers.insert(instant, cx.waker().clone()));
+            executor_context(|exec| exec.reactor.timers.insert(instant, cx.waker().clone()));
             Poll::Pending
         } else {
             Poll::Ready(())

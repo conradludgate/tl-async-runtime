@@ -15,20 +15,19 @@ use std::thread::{self, Thread};
 
 mod driver;
 mod ready;
+mod reactor;
 
-/// Tools used for communicating with the OS
-pub mod io;
-/// Timers used for pausing tasks for fixed durations
-pub mod timers;
+/// Networking specific handlers
+pub mod net;
+pub use reactor::timers::Sleep;
 
 type Task = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
 #[derive(Default)]
 struct Executor {
     threadn: AtomicUsize,
     threads: RwLock<Vec<Thread>>,
-    timers: timers::Queue,
+    reactor: reactor::Reactor,
     ready: ready::Queue,
-    os: io::Os,
     parked: AtomicUsize,
 }
 
@@ -74,19 +73,6 @@ impl Executor {
         SpawnHandle(receiver)
     }
 
-    // this is run by any thread that currently is not busy.
-    // It manages the timers and OS polling in order to wake up tasks
-    fn book_keeping(&self) -> usize {
-        let mut n = 0;
-        // get the current task timers that have elapsed and insert them into the ready tasks
-        for task in &self.timers {
-            task.wake();
-            n += 1;
-        }
-
-        // get the OS events
-        n + self.os.process()
-    }
 
     /// Run a future to completion.
     ///

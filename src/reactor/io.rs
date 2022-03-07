@@ -1,6 +1,3 @@
-/// Networking specific handlers
-pub mod net;
-
 use crate::{driver::executor_context, Executor};
 use chashmap::CHashMap;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
@@ -110,11 +107,8 @@ impl<S: Source> Registration<S> {
     pub fn new(mut source: S, interests: mio::Interest) -> std::io::Result<Self> {
         executor_context(|exec| {
             let token = mio::Token(rand::thread_rng().gen());
-            exec.os
-                .poll
-                .read()
-                .registry()
-                .register(&mut source, token, interests)?;
+            let poll = exec.reactor.os.poll.read();
+            poll.registry().register(&mut source, token, interests)?;
             Ok(Self {
                 exec: exec.clone(),
                 token,
@@ -127,7 +121,7 @@ impl<S: Source> Registration<S> {
     // and return a receiver to it
     pub fn events(&self) -> UnboundedReceiver<Event> {
         let (sender, receiver) = unbounded();
-        self.exec.os.tasks.insert(self.token, sender);
+        self.exec.reactor.os.tasks.insert(self.token, sender);
         receiver
     }
 }
@@ -135,14 +129,9 @@ impl<S: Source> Registration<S> {
 impl<S: Source> Drop for Registration<S> {
     fn drop(&mut self) {
         // deregister the source from the OS
-        self.exec
-            .os
-            .poll
-            .read()
-            .registry()
-            .deregister(&mut self.source)
-            .unwrap();
+        let poll = self.exec.reactor.os.poll.read();
+        poll.registry().deregister(&mut self.source).unwrap();
         // remove the event dispatcher
-        self.exec.os.tasks.remove(&self.token);
+        self.exec.reactor.os.tasks.remove(&self.token);
     }
 }

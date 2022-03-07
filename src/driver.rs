@@ -40,7 +40,7 @@ impl Executor {
     fn park_thread(&self) {
         // before getting parked, ensure any
         // waiting tasks are promoted to ready
-        if self.book_keeping() == 0 {
+        if self.reactor.book_keeping() == 0 {
             // Skip if parking would cause all threads to be parked.
             // We need at least 1 thread running the books.
             let parked = self.parked.fetch_add(1, Ordering::Relaxed);

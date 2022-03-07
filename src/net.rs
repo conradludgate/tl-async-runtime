@@ -10,7 +10,7 @@ use mio::Interest;
 use pin_project::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use super::{Event, Registration};
+use crate::reactor::io::{Event, Registration};
 
 /// Listener for TCP events
 pub struct TcpListener {

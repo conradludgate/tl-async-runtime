@@ -27,9 +27,8 @@ use std::{
 };
 use tl_async_runtime::{
     block_on,
-    io::net::{TcpListener, TcpStream},
-    spawn,
-    timers::Sleep,
+    net::{TcpListener, TcpStream},
+    spawn, Sleep,
 };
 use tokio_util::codec::{Decoder, Encoder, Framed};
 
