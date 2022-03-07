@@ -75,11 +75,11 @@ I got the following results:
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    75.04ms   15.04ms 165.93ms   59.90%
-    Req/Sec   108.06     86.70   340.00     46.55%
-  15049 requests in 20.03s, 2.18MB read
-Requests/sec:    751.32
-Transfer/sec:    111.52KB
+    Latency    74.78ms   14.82ms 173.46ms   59.86%
+    Req/Sec   117.42    109.90   404.00     76.17%
+  25755 requests in 20.10s, 3.73MB read
+Requests/sec:   1281.44
+Transfer/sec:    190.21KB
 ```
 
 #### Tokio
@@ -87,11 +87,11 @@ Transfer/sec:    111.52KB
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    76.97ms   16.91ms 229.32ms   66.45%
-    Req/Sec   536.28     67.71   787.00     92.65%
-  127510 requests in 20.15s, 18.48MB read
-Requests/sec:   6329.32
-Transfer/sec:      0.92MB
+    Latency    78.58ms   19.57ms 252.46ms   75.52%
+    Req/Sec   527.69     72.58   747.00     88.10%
+  125196 requests in 20.09s, 18.15MB read
+Requests/sec:   6231.95
+Transfer/sec:      0.90MB
 ```
 
 ### Single threaded
@@ -101,11 +101,11 @@ Transfer/sec:      0.92MB
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    74.81ms   14.61ms 149.33ms   57.70%
-    Req/Sec   280.34    157.76   757.00     61.96%
-  67171 requests in 20.10s, 9.74MB read
-Requests/sec:   3342.51
-Transfer/sec:    496.15KB
+    Latency    75.63ms   16.24ms 199.04ms   63.16%
+    Req/Sec   282.34    112.53   707.00     70.57%
+  61703 requests in 20.07s, 8.94MB read
+Requests/sec:   3074.14
+Transfer/sec:    456.32KB
 ```
 
 #### Tokio
@@ -113,10 +113,10 @@ Transfer/sec:    496.15KB
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    76.06ms   14.88ms 185.92ms   59.61%
-    Req/Sec   540.69     44.05   707.00     82.12%
-  129271 requests in 20.07s, 18.74MB read
-Requests/sec:   6441.72
+    Latency    76.28ms   15.26ms 185.57ms   60.50%
+    Req/Sec   539.62     52.73   780.00     90.20%
+  128620 requests in 20.08s, 18.64MB read
+Requests/sec:   6406.56
 Transfer/sec:      0.93MB
 ```
 
@@ -141,9 +141,9 @@ When benchmarking a non-async version that uses an OS thread per active connecti
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   136.41ms  121.26ms 601.08ms   15.52%
-    Req/Sec     3.37k     2.17k   11.65k    63.80%
-  798069 requests in 20.07s, 115.69MB read
-Requests/sec:  39763.05
-Transfer/sec:      5.76MB
+    Latency   140.12ms  122.82ms 780.91ms   16.68%
+    Req/Sec     3.20k     2.30k   18.82k    68.92%
+  750797 requests in 20.07s, 108.83MB read
+Requests/sec:  37408.86
+Transfer/sec:      5.42MB
 ```
