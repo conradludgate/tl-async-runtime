@@ -75,11 +75,11 @@ I got the following results:
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    74.83ms   14.51ms 145.71ms   58.08%
-    Req/Sec   125.80     60.94   262.00     54.55%
-  12545 requests in 20.10s, 1.82MB read
-Requests/sec:    624.24
-Transfer/sec:     92.66KB
+    Latency    75.04ms   15.04ms 165.93ms   59.90%
+    Req/Sec   108.06     86.70   340.00     46.55%
+  15049 requests in 20.03s, 2.18MB read
+Requests/sec:    751.32
+Transfer/sec:    111.52KB
 ```
 
 #### Tokio
@@ -87,11 +87,11 @@ Transfer/sec:     92.66KB
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   126.05ms   43.62ms 274.81ms   57.92%
-    Req/Sec   325.58     40.00   430.00     74.61%
-  77921 requests in 20.07s, 11.30MB read
-Requests/sec:   3882.07
-Transfer/sec:    576.25KB
+    Latency    76.97ms   16.91ms 229.32ms   66.45%
+    Req/Sec   536.28     67.71   787.00     92.65%
+  127510 requests in 20.15s, 18.48MB read
+Requests/sec:   6329.32
+Transfer/sec:      0.92MB
 ```
 
 ### Single threaded
@@ -101,11 +101,11 @@ Transfer/sec:    576.25KB
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    74.67ms   14.43ms 137.12ms   56.11%
-    Req/Sec   172.55    104.14   393.00     58.74%
-  24109 requests in 20.08s, 3.49MB read
-Requests/sec:   1200.74
-Transfer/sec:    178.23KB
+    Latency    74.81ms   14.61ms 149.33ms   57.70%
+    Req/Sec   280.34    157.76   757.00     61.96%
+  67171 requests in 20.10s, 9.74MB read
+Requests/sec:   3342.51
+Transfer/sec:    496.15KB
 ```
 
 #### Tokio
@@ -113,16 +113,16 @@ Transfer/sec:    178.23KB
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   126.14ms   43.27ms 220.68ms   57.62%
-    Req/Sec   325.27     38.86   440.00     73.58%
-  77761 requests in 20.04s, 11.27MB read
-Requests/sec:   3879.42
-Transfer/sec:    575.85KB
+    Latency    76.06ms   14.88ms 185.92ms   59.61%
+    Req/Sec   540.69     44.05   707.00     82.12%
+  129271 requests in 20.07s, 18.74MB read
+Requests/sec:   6441.72
+Transfer/sec:      0.93MB
 ```
 
 ### Conclusion
 
-Tokio's has a similar latency and roughly 4x the throughput
+Tokio's has a similar latency and roughly 2x the throughput on the single threaded executor
 
 Tokio also has a similar multi-threaded vs single-threaded performance in this example.
 This runtime seems to have a degraded performance when attempting to use multiple threads.
@@ -141,9 +141,9 @@ When benchmarking a non-async version that uses an OS thread per active connecti
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    61.15ms   41.57ms 389.98ms   35.04%
-    Req/Sec    25.17k    15.52k   63.76k    59.01%
-  6013517 requests in 20.06s, 0.85GB read
-Requests/sec: 299715.59
-Transfer/sec:     43.45MB
+    Latency   136.41ms  121.26ms 601.08ms   15.52%
+    Req/Sec     3.37k     2.17k   11.65k    63.80%
+  798069 requests in 20.07s, 115.69MB read
+Requests/sec:  39763.05
+Transfer/sec:      5.76MB
 ```
