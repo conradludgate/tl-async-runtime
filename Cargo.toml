@@ -19,7 +19,7 @@ tokio = "1" # might be cheating. I'm using tokio's AsyncRead/Write traits and he
 
 [dependencies.educe]
 version = "*"
-features = ["Default"]
+features = ["Default", "PartialEq", "Eq", "PartialOrd", "Ord"]
 default-features = false
 
 [dev-dependencies]

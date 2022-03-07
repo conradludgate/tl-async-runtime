@@ -68,9 +68,9 @@ impl Os {
 
         for event in &*self.events.read() {
             if let Some(sender) = self.tasks.get(&event.token()) {
-                if sender.unbounded_send(event.into()).is_err() {
-                    n += 1;
-                    remove.push(event.token());
+                match sender.unbounded_send(event.into()) {
+                    Ok(()) => n += 1,
+                    Err(_) => remove.push(event.token()),
                 }
             }
         }

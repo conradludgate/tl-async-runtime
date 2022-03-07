@@ -83,23 +83,19 @@ impl Sleep {
     }
 }
 
-struct PriorityQueueEntry<I, P>(I, P);
-impl<I, P: PartialEq> PartialEq for PriorityQueueEntry<I, P> {
-    fn eq(&self, other: &Self) -> bool {
-        self.1 == other.1
-    }
-}
-impl<I, P: Eq> Eq for PriorityQueueEntry<I, P> {}
-impl<I, P: PartialOrd> PartialOrd for PriorityQueueEntry<I, P> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.1.partial_cmp(&other.1)
-    }
-}
-
-impl<I, P: Ord> Ord for PriorityQueueEntry<I, P> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.1.cmp(&other.1)
-    }
-}
+// eq/ord only by P
+#[derive(Educe)]
+#[educe(PartialEq(bound = "P: std::cmp::PartialEq"))]
+#[educe(Eq(bound = "P: std::cmp::Eq"))]
+#[educe(PartialOrd(bound = "P: std::cmp::PartialOrd"))]
+#[educe(Ord(bound = "P: std::cmp::Ord"))]
+struct PriorityQueueEntry<I, P>(
+    #[educe(PartialEq(ignore))]
+    #[educe(Eq(ignore))]
+    #[educe(PartialOrd(ignore))]
+    #[educe(Ord(ignore))]
+    I,
+    P,
+);
 
 type PriorityQueue<I, P> = Vec<PriorityQueueEntry<I, P>>;

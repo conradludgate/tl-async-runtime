@@ -12,7 +12,6 @@ use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
-use std::thread::{self, Thread};
 
 mod executor;
 mod reactor;
@@ -67,7 +66,7 @@ impl Executor {
         // spawn a bunch of worker threads
         for i in 1..self.ready.max_waiting {
             let exec = self.clone();
-            thread::Builder::new()
+            std::thread::Builder::new()
                 .name(format!("tl-async-runtime-worker-{}", i))
                 .spawn(move || {
                     // register this new thread as a worker in the runtime
@@ -84,7 +83,7 @@ impl Executor {
 
         // Waker specifically for the main thread.
         // Used to wake up the main thread when the output value is ready
-        let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
+        let waker = Waker::from(Arc::new(ThreadWaker(self.clone())));
         let mut cx = Context::from_waker(&waker);
 
         // Run the future to completion.
@@ -100,11 +99,11 @@ impl Executor {
     }
 }
 
-struct ThreadWaker(Thread);
+struct ThreadWaker(Arc<Executor>);
 
 impl Wake for ThreadWaker {
     fn wake(self: Arc<Self>) {
-        self.0.unpark();
+        self.0.ready.wake_all();
     }
 }
 

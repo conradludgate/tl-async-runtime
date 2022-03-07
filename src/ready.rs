@@ -27,6 +27,10 @@ impl Queue {
         self.waker.notify_one();
     }
 
+    pub fn wake_all(&self) {
+        self.waker.notify_all();
+    }
+
     pub fn should_wait(&self) -> bool {
         self.len.load(Ordering::SeqCst) == 0
     }
