@@ -1,35 +1,26 @@
 #![forbid(unsafe_code)]
 
-use driver::executor_context;
+#[macro_use]
+extern crate educe;
+
+use executor::{context, Executor};
 use futures::channel::oneshot;
 use futures::{pin_mut, FutureExt};
-use parking_lot::RwLock;
 use pin_project::pin_project;
 use std::future::Future;
 use std::ops::ControlFlow;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 
-mod driver;
-mod ready;
+mod executor;
 mod reactor;
+mod ready;
 
 /// Networking specific handlers
 pub mod net;
 pub use reactor::timers::Sleep;
-
-type Task = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
-#[derive(Default)]
-struct Executor {
-    threadn: AtomicUsize,
-    threads: RwLock<Vec<Thread>>,
-    reactor: reactor::Reactor,
-    ready: ready::Queue,
-    parked: AtomicUsize,
-}
 
 #[pin_project]
 pub struct SpawnHandle<R>(#[pin] oneshot::Receiver<R>);
@@ -45,17 +36,6 @@ impl<R> Future for SpawnHandle<R> {
 }
 
 impl Executor {
-    /// Signals that a task is now ready to be worked on
-    pub(crate) fn signal_ready(&self, task: Task) {
-        self.ready.push(task);
-
-        // get a 'random' thread from the loop and wake it up.
-        // does nothing if the thread is not parked.
-        let threadn = self.threadn.fetch_add(1, Ordering::Relaxed);
-        let threads = self.threads.read();
-        threads[threadn % threads.len()].unpark();
-    }
-
     /// Spawns a task in this executor
     pub(crate) fn spawn<F>(&self, fut: F) -> SpawnHandle<F::Output>
     where
@@ -67,12 +47,11 @@ impl Executor {
         // Pin the future. Also wrap it s.t. it sends it's output over the channel
         let fut = Box::pin(fut.map(|out| sender.send(out).unwrap_or_default()));
         // insert the task into the runtime and signal that it is ready for processing
-        self.signal_ready(fut);
+        self.ready.signal(fut);
 
         // return the handle to the reciever so that it can be `await`ed with it's output value
         SpawnHandle(receiver)
     }
-
 
     /// Run a future to completion.
     ///
@@ -86,8 +65,7 @@ impl Executor {
         self.register();
 
         // spawn a bunch of worker threads
-        let threads = thread::available_parallelism().map_or(4, |t| t.get());
-        for i in 1..threads {
+        for i in 1..self.ready.max_waiting {
             let exec = self.clone();
             thread::Builder::new()
                 .name(format!("tl-async-runtime-worker-{}", i))
@@ -138,7 +116,7 @@ where
     F: Future<Output = R> + Send + Sync + 'static,
     R: Send + Sync + 'static,
 {
-    executor_context(|exec| exec.clone().spawn(fut))
+    context(|exec| exec.clone().spawn(fut))
 }
 
 /// Run a future to completion.

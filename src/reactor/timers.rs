@@ -9,7 +9,7 @@ use futures::Future;
 use parking_lot::{Mutex, MutexGuard};
 use pin_project::pin_project;
 
-use crate::driver::executor_context;
+use crate::executor::context;
 
 type TimerQueue = PriorityQueue<Waker, Reverse<Instant>>;
 #[derive(Default)]
@@ -64,7 +64,7 @@ impl Future for Sleep {
         let instant = *self.project().instant;
         // if the future is not yet ready
         if instant > Instant::now() {
-            executor_context(|exec| exec.reactor.timers.insert(instant, cx.waker().clone()));
+            context(|exec| exec.reactor.timers.insert(instant, cx.waker().clone()));
             Poll::Pending
         } else {
             Poll::Ready(())

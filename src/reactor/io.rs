@@ -1,4 +1,4 @@
-use crate::{driver::executor_context, Executor};
+use crate::{executor::context, Executor};
 use chashmap::CHashMap;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use mio::event::Source;
@@ -105,7 +105,7 @@ impl<S: Source> DerefMut for Registration<S> {
 
 impl<S: Source> Registration<S> {
     pub fn new(mut source: S, interests: mio::Interest) -> std::io::Result<Self> {
-        executor_context(|exec| {
+        context(|exec| {
             let token = mio::Token(rand::thread_rng().gen());
             let poll = exec.reactor.os.poll.read();
             poll.registry().register(&mut source, token, interests)?;

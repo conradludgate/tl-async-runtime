@@ -11,12 +11,16 @@ repository = "https://github.com/conradludgate/tl-async-runtime"
 [dependencies]
 futures = "0.3"
 rand = "0.8"
-crossbeam-channel = "0.5"
 pin-project = "1.0"
 mio = { version = "0.8", features = ["os-poll", "net"] }
 chashmap = "2.2.2"
 parking_lot = "0.12"
 tokio = "1" # might be cheating. I'm using tokio's AsyncRead/Write traits and helpers
+
+[dependencies.educe]
+version = "*"
+features = ["Default"]
+default-features = false
 
 [dev-dependencies]
 bytes = "1.0.0"

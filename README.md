@@ -75,11 +75,11 @@ I got the following results:
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    74.62ms   14.46ms 101.35ms   57.84%
-    Req/Sec   107.43     67.91   250.00     61.36%
-  10708 requests in 20.07s, 1.55MB read
-Requests/sec:    533.55
-Transfer/sec:     79.20KB
+    Latency    74.83ms   14.51ms 145.71ms   58.08%
+    Req/Sec   125.80     60.94   262.00     54.55%
+  12545 requests in 20.10s, 1.82MB read
+Requests/sec:    624.24
+Transfer/sec:     92.66KB
 ```
 
 #### Tokio
@@ -101,11 +101,11 @@ Transfer/sec:    576.25KB
 Running 20s test @ http://localhost:8080/json
   12 threads and 500 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency    74.75ms   14.53ms 137.04ms   57.81%
-    Req/Sec   137.25     83.36   340.00     67.56%
-  21907 requests in 20.08s, 3.18MB read
-Requests/sec:   1090.72
-Transfer/sec:    161.90KB
+    Latency    74.67ms   14.43ms 137.12ms   56.11%
+    Req/Sec   172.55    104.14   393.00     58.74%
+  24109 requests in 20.08s, 3.49MB read
+Requests/sec:   1200.74
+Transfer/sec:    178.23KB
 ```
 
 #### Tokio

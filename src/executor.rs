@@ -1,19 +1,20 @@
-use crate::{Executor, Task};
-use crossbeam_channel::TryRecvError;
+use futures::Future;
 use parking_lot::Mutex;
 use std::{
     cell::RefCell,
     ops::ControlFlow,
-    sync::{atomic::Ordering, Arc},
+    pin::Pin,
+    sync::Arc,
     task::{Context, Wake, Waker},
-    thread,
 };
+
+use crate::{reactor::Reactor, ready};
 
 thread_local! {
     static EXECUTOR: RefCell<Option<Arc<Executor>>> = RefCell::new(None);
 }
 
-pub(crate) fn executor_context<R>(f: impl FnOnce(&Arc<Executor>) -> R) -> R {
+pub(crate) fn context<R>(f: impl FnOnce(&Arc<Executor>) -> R) -> R {
     EXECUTOR.with(|exec| {
         let exec = exec.borrow();
         let exec = exec
@@ -31,45 +32,25 @@ struct TaskWaker {
 impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
         if let Some(task) = self.task.lock().take() {
-            self.executor.signal_ready(task);
+            self.executor.ready.signal(task);
         }
     }
 }
 
-impl Executor {
-    fn park_thread(&self) {
-        // before getting parked, ensure any
-        // waiting tasks are promoted to ready
-        if self.reactor.book_keeping() == 0 {
-            // Skip if parking would cause all threads to be parked.
-            // We need at least 1 thread running the books.
-            let parked = self.parked.fetch_add(1, Ordering::Relaxed);
-            if parked + 1 < self.threads.read().len() {
-                thread::park();
-            }
-            self.parked.fetch_sub(1, Ordering::Release);
-        }
-    }
+pub type Task = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
+#[derive(Default)]
+pub struct Executor {
+    pub(crate) reactor: Reactor,
+    pub(crate) ready: ready::Queue,
+}
 
+impl Executor {
     /// Get a single task from the queue.
     ///
     /// Parks if there are no tasks available.
-    /// Returns Break if the task queue is broken.
     fn acquire_task(&self) -> ControlFlow<(), Option<Task>> {
-        match self.ready.poll() {
-            Ok(task) => ControlFlow::Continue(Some(task)),
-            Err(TryRecvError::Empty) => {
-                // if no tasks are available, park the thread.
-                // threads are woken up randomly when new tasks become available
-                self.park_thread();
-
-                ControlFlow::Continue(None)
-            }
-            Err(TryRecvError::Disconnected) => {
-                // queue has closed, this means the block_on main thread has exited
-                ControlFlow::Break(())
-            }
-        }
+        let should_wait = self.ready.should_wait() && self.reactor.book_keeping() == 0;
+        ControlFlow::Continue(self.ready.acquire_task(should_wait))
     }
 
     /// Try run a single task.
@@ -104,7 +85,6 @@ impl Executor {
 
     /// register this executor on the current thread
     pub(crate) fn register(self: &Arc<Self>) {
-        self.threads.write().push(thread::current());
         EXECUTOR.with(|exec| *exec.borrow_mut() = Some(self.clone()));
     }
 }
